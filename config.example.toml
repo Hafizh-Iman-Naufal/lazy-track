@@ -1,0 +1,35 @@
+[work]
+hours_per_day = 8
+weekly_target = 40
+working_days = ["mon", "tue", "wed", "thu", "fri"]
+weekend_days = ["sat", "sun"]
+timezone = "UTC"
+
+[work.overtime]
+enabled = true
+default_hours = 0
+
+[jira]
+base_url = ""
+assigned_only = true
+edit_manual_worklogs = false
+
+[ai]
+provider = "gemini"
+model = ""
+
+[ai.providers.gemini]
+enabled = true
+
+[ai.providers.deepseek]
+enabled = true
+
+[ai.providers.minimax]
+enabled = true
+
+[safety]
+require_confirmation = true
+allow_issue_mutations = false
+allow_worklog_create = true
+allow_worklog_update = true
+allow_worklog_delete = true
