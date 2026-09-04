@@ -95,6 +95,7 @@ def config_show():
 def sync(
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Print JQL and raw results"),
     include_done: bool = typer.Option(False, "--include-done", "-d", help="Include Done status issues"),
+    sync_worklogs: bool = typer.Option(True, "--sync-worklogs/--no-worklogs", help="Sync worklogs"),
 ):
     """Sync issues and worklogs from Jira."""
     console.print("[yellow]Syncing with Jira...[/yellow]")
@@ -122,8 +123,10 @@ def sync(
             console.print(f"[dim]Found:[/dim] [cyan]{len(issues)}[/cyan] issues")
             if not issues and not use_done:
                 console.print("[dim]Hint: try -d to include Done status issues[/dim]")
-            for issue in issues:
+            for issue in issues[:10]:
                 console.print(f"  {issue.key} [{issue.status}] {issue.summary}")
+            if len(issues) > 10:
+                console.print(f"  [dim]... and {len(issues) - 10} more[/dim]")
 
         db = get_db()
         conn = db.connect()
@@ -146,9 +149,44 @@ def sync(
             )
 
         conn.commit()
+
+        worklog_count = 0
+        if sync_worklogs:
+            today = date.today()
+            start_of_week = today - timedelta(days=today.weekday())
+            start_date = start_of_week - timedelta(weeks=4)
+
+            if verbose:
+                console.print(f"[dim]Syncing worklogs from {start_date} to {today}...[/dim]")
+
+            async def do_sync_worklogs():
+                return await gateway.get_worklogs_for_user(start_date, today)
+
+            worklogs = asyncio.run(do_sync_worklogs())
+
+            for wl in worklogs:
+                if wl.author_is_current_user:
+                    conn.execute(
+                        """
+                        INSERT OR REPLACE INTO worklog_cache 
+                        (id, issue_key, work_date, seconds, author, managed_by_lazytrack)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                        """,
+                        (wl.id, wl.issue_key, wl.work_date.isoformat(), wl.seconds, "current_user", 0),
+                    )
+                    worklog_count += 1
+
+            conn.commit()
+
+            if verbose:
+                console.print(f"[dim]Synced:[/dim] [cyan]{worklog_count}[/cyan] worklogs")
+
         db.close()
 
-        console.print(f"[green]Synced {len(issues)} issues[/green]")
+        parts = [f"[green]Synced {len(issues)} issues[/green]"]
+        if sync_worklogs and worklog_count > 0:
+            parts.append(f"[green]{worklog_count} worklogs[/green]")
+        console.print(" + ".join(parts))
 
     except JiraAuthenticationError:
         console.print("[red]Authentication failed. Check JIRA_EMAIL and JIRA_API_TOKEN[/red]")
@@ -215,7 +253,7 @@ def status(
         today = date.today()
         week_start = today - timedelta(days=today.weekday())
 
-    week_end = week_start + timedelta(days=4)
+    week_end = week_start + timedelta(days=6)
 
     db = get_db()
     calendar_repo = CalendarRepository(db.connect())
@@ -245,7 +283,10 @@ def status(
         worklog_hours[date.fromisoformat(row["work_date"])] = Decimal(str(row["total_seconds"])) / 3600
     db.close()
 
-    total_logged = sum(worklog_hours.values(), Decimal("0"))
+    total_logged = sum(
+        hours for d, hours in worklog_hours.items()
+        if week_start <= d <= week_end
+    )
 
     table = Table(title=f"Week: {week_start} - {week_end}")
     table.add_column("Day", style="cyan")
@@ -270,7 +311,7 @@ def status(
     console.print(f"\n[bold]Summary:[/bold]")
     console.print(f"  Required:  {weekly.required_target}h")
     console.print(f"  Logged:    {total_logged}h")
-    console.print(f"  Missing:   {weekly.missing_hours}h")
+    console.print(f"  Missing:   {max(Decimal('0'), weekly.required_target - total_logged)}h")
 
 
 @leave_cmd.command("add")

@@ -91,8 +91,9 @@ lazytrack config show
 
 # Sync Jira issues
 lazytrack sync
-lazytrack sync -d      # include Done status issues
-lazytrack sync -v      # verbose (print JQL and results)
+lazytrack sync -d              # include Done status issues
+lazytrack sync -v              # verbose (print JQL and results)
+lazytrack sync --no-worklogs   # skip worklog sync
 
 # List assigned issues
 lazytrack issues

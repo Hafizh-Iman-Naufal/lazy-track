@@ -59,30 +59,34 @@ async def get_worklogs_for_user(
     )
 
     all_worklogs = []
-    start_at = 0
-    page_size = 100
+    next_token = None
 
     while True:
-        response = client.get(
-            "/rest/api/3/search/jql",
-            params={
-                "jql": jql,
-                "startAt": start_at,
-                "maxResults": page_size,
-                "fields": "worklog",
-            },
-        )
+        params = {
+            "jql": jql,
+            "startAt": 0,
+            "maxResults": 100,
+            "fields": "key,worklog",
+        }
+        if next_token:
+            params["nextPageToken"] = next_token
+
+        response = client.get("/rest/api/3/search/jql", params=params)
 
         issues = response.get("issues", [])
         for issue in issues:
+            issue_key = issue.get("key", issue.get("id", ""))
             worklogs = issue.get("fields", {}).get("worklog", {}).get("worklogs", [])
             for w in worklogs:
-                w["issueId"] = issue["key"]
+                w["issueId"] = issue_key
                 all_worklogs.append(parse_worklog(w, current_user_key))
 
-        total = response.get("total", 0)
-        start_at += len(issues)
-        if start_at >= total:
+        if response.get("isLast", True):
             break
+        next_token = response.get("nextPageToken")
+        if not next_token:
+            break
+
+    return all_worklogs
 
     return all_worklogs
