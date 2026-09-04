@@ -1,8 +1,8 @@
 from pathlib import Path
 
 import tomllib
+from dotenv import dotenv_values
 from pydantic import BaseModel, Field, field_validator
-from pydantic_settings import BaseSettings
 
 
 class WorkOvertimeConfig(BaseModel):
@@ -39,6 +39,8 @@ class JiraConfig(BaseModel):
     base_url: str = ""
     email: str = ""
     api_token: str = ""
+    project: str = ""
+    include_done: bool = False
     assigned_only: bool = True
     edit_manual_worklogs: bool = False
 
@@ -109,11 +111,7 @@ def load_config(
 
     settings_data = {}
     if env_file_path.exists():
-        settings_data = BaseSettings(
-            env_file=str(env_file_path),
-            env_file_encoding="utf-8",
-            extra="ignore",
-        ).model_dump()
+        settings_data = dotenv_values(env_file_path) if env_file_path.exists() else {}
 
     merged = _merge_dicts(defaults, toml_config)
 
@@ -125,6 +123,8 @@ def load_config(
         config.jira.email = settings_data["JIRA_EMAIL"]
     if settings_data.get("JIRA_API_TOKEN"):
         config.jira.api_token = settings_data["JIRA_API_TOKEN"]
+    if settings_data.get("JIRA_PROJECT_KEY"):
+        config.jira.project = settings_data["JIRA_PROJECT_KEY"]
     if settings_data.get("GEMINI_API_KEY"):
         config.ai.providers.gemini.api_key = settings_data["GEMINI_API_KEY"]
     if settings_data.get("DEEPSEEK_API_KEY"):

@@ -64,7 +64,7 @@ async def get_worklogs_for_user(
 
     while True:
         response = client.get(
-            "/rest/api/3/search",
+            "/rest/api/3/search/jql",
             params={
                 "jql": jql,
                 "startAt": start_at,

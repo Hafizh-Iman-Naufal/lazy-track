@@ -34,9 +34,10 @@ class RestrictiveJiraGateway:
     async def search_assigned_issues(
         self,
         project_filter: Optional[str] = None,
+        include_done: bool = False,
         limit: int = 100,
     ) -> list[IssueSummary]:
-        jql = build_assigned_issues_jql(project_filter)
+        jql = build_assigned_issues_jql(project_filter, include_done)
         raw_issues = await search_issues(self._client, jql, limit)
         return [
             parse_jira_issue(issue, self._current_user_key)

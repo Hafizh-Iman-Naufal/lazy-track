@@ -21,11 +21,11 @@ def parse_jira_issue(raw: dict, current_user_key: str) -> IssueSummary:
 
 def build_assigned_issues_jql(
     project_filter: Optional[str] = None,
+    include_done: bool = False,
 ) -> str:
-    jql_parts = [
-        "assignee = currentUser()",
-        "statusCategory != Done",
-    ]
+    jql_parts = ["assignee = currentUser()"]
+    if not include_done:
+        jql_parts.append("statusCategory != Done")
     if project_filter:
         jql_parts.append(f"project = {project_filter}")
     return " AND ".join(jql_parts) + " ORDER BY updated DESC"
@@ -42,7 +42,7 @@ async def search_issues(
 
     while start_at < limit:
         response = client.get(
-            "/rest/api/3/search",
+            "/rest/api/3/search/jql",
             params={
                 "jql": jql,
                 "startAt": start_at,

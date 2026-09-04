@@ -92,19 +92,38 @@ def config_show():
 
 
 @cli.command()
-def sync():
+def sync(
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Print JQL and raw results"),
+    include_done: bool = typer.Option(False, "--include-done", "-d", help="Include Done status issues"),
+):
     """Sync issues and worklogs from Jira."""
     console.print("[yellow]Syncing with Jira...[/yellow]")
 
     try:
+        config = load_config()
         gateway = get_jira_gateway()
 
+        use_done = include_done or config.jira.include_done
+        project = config.jira.project or None
+
         async def do_sync():
-            await gateway.get_current_user()
-            issues = await gateway.search_assigned_issues()
+            user = await gateway.get_current_user()
+            if verbose:
+                console.print(f"[dim]Logged in as:[/dim] [cyan]{user.get('displayName', '?')} ({user.get('accountId', '?')})[/cyan]")
+            issues = await gateway.search_assigned_issues(project, use_done)
             return issues
 
         issues = asyncio.run(do_sync())
+
+        if verbose:
+            from lazytrack.jira.issues import build_assigned_issues_jql
+            jql = build_assigned_issues_jql(project, use_done)
+            console.print(f"[dim]JQL:[/dim] [cyan]{jql}[/cyan]")
+            console.print(f"[dim]Found:[/dim] [cyan]{len(issues)}[/cyan] issues")
+            if not issues and not use_done:
+                console.print("[dim]Hint: try -d to include Done status issues[/dim]")
+            for issue in issues:
+                console.print(f"  {issue.key} [{issue.status}] {issue.summary}")
 
         db = get_db()
         conn = db.connect()

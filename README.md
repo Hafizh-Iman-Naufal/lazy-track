@@ -58,13 +58,27 @@ Edit `.env` with your credentials:
 JIRA_BASE_URL=https://your-domain.atlassian.net
 JIRA_EMAIL=you@example.com
 JIRA_API_TOKEN=your-token
+JIRA_PROJECT_KEY=SP  # optional, filters by project key
 
 GEMINI_API_KEY=
 DEEPSEEK_API_KEY=
 MINIMAX_API_KEY=
 ```
 
-Copy `config.example.toml` to `config.toml` for additional settings.
+### Jira Credentials
+
+- **JIRA_BASE_URL** — Your Atlassian cloud domain (e.g. `https://your-domain.atlassian.net`)
+- **JIRA_EMAIL** — Email used to log into your Atlassian account
+- **JIRA_API_TOKEN** — Generate at [id.atlassian.com/manage-profile/security/api-tokens](https://id.atlassian.com/manage-profile/security/api-tokens): click **Create API token**, label it (e.g. `lazytrack`), copy the value
+
+Copy `config.example.toml` to `config.toml` for additional settings. Key `[jira]` options:
+
+```toml
+[jira]
+base_url = "https://nucleusbi.atlassian.net"
+project = "SP"          # filters by project key (optional)
+include_done = false     # include Done status issues in sync (optional)
+```
 
 ## Quick Start
 
@@ -77,6 +91,8 @@ lazytrack config show
 
 # Sync Jira issues
 lazytrack sync
+lazytrack sync -d      # include Done status issues
+lazytrack sync -v      # verbose (print JQL and results)
 
 # List assigned issues
 lazytrack issues
