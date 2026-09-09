@@ -78,10 +78,10 @@ class TestDailyCapacity:
         calendar.add_overtime(OvertimeEntry(date=monday, hours=Decimal("2")))
         assert calendar.max_hours_for_date(monday) == Decimal("10")
 
-    def test_weekend_overtime_does_not_count(self, calendar):
+    def test_weekend_overtime_sets_weekend_capacity(self, calendar):
         saturday = date(2026, 9, 5)
         calendar.add_overtime(OvertimeEntry(date=saturday, hours=Decimal("4")))
-        assert calendar.max_hours_for_date(saturday) == Decimal("0")
+        assert calendar.max_hours_for_date(saturday) == Decimal("4")
 
 
 class TestInvalidInputs:

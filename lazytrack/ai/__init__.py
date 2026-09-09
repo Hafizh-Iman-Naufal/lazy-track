@@ -27,12 +27,13 @@ from lazytrack.ai.schemas import (
     RemoveLeaveIntent,
     AddHolidayIntent,
     RemoveHolidayIntent,
-    AddOvertimeIntent,
-    RemoveOvertimeIntent,
     ClarificationRequired,
+    IntentSchema,
     UnionIntent,
 )
 from lazytrack.ai.prompts import SYSTEM_PROMPT, build_intent_prompt
+from lazytrack.ai.normalize import ParseContext, parse_intent, normalize_intent_dict
+from lazytrack.ai.generate import generate_structured_intent
 
 registry = get_registry()
 registry.register("gemini", GeminiProvider)
@@ -66,10 +67,13 @@ __all__ = [
     "RemoveLeaveIntent",
     "AddHolidayIntent",
     "RemoveHolidayIntent",
-    "AddOvertimeIntent",
-    "RemoveOvertimeIntent",
     "ClarificationRequired",
+    "IntentSchema",
     "UnionIntent",
     "SYSTEM_PROMPT",
     "build_intent_prompt",
+    "ParseContext",
+    "parse_intent",
+    "normalize_intent_dict",
+    "generate_structured_intent",
 ]

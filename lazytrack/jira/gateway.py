@@ -25,5 +25,6 @@ class JiraGateway(Protocol):
         self,
         start_date: date | None = None,
         end_date: date | None = None,
+        timezone: str = "UTC",
     ) -> list[WorklogEntry]:
         ...

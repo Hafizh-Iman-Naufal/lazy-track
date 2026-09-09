@@ -1,5 +1,10 @@
 from lazytrack.storage.database import Database, get_db
-from lazytrack.storage.repositories import AuditRepository, CalendarRepository, PlanRepository
+from lazytrack.storage.repositories import (
+    AuditRepository,
+    CalendarRepository,
+    PlanRepository,
+    WorklogCacheRepository,
+)
 
 __all__ = [
     "Database",
@@ -7,4 +12,5 @@ __all__ = [
     "CalendarRepository",
     "PlanRepository",
     "AuditRepository",
+    "WorklogCacheRepository",
 ]

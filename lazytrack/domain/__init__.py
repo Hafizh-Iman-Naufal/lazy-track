@@ -54,7 +54,7 @@ class DailyCapacity(BaseModel):
     @property
     def max_capacity(self) -> Decimal:
         if self.is_weekend:
-            return Decimal("0")
+            return self.approved_overtime
         return self.required_capacity + self.approved_overtime
 
 
@@ -88,13 +88,13 @@ class WeeklyCapacity(BaseModel):
 from lazytrack.domain.planner import (
     Allocation,
     AllocationRequest,
+    WorklogAllocation,
     AmbiguousIssueError,
     DuplicateOperationError,
     InvalidDateError,
     ManualWorklogModificationError,
     OperationStatus,
     OperationType,
-    OverCapacityError,
     Planner,
     PlannerContext,
     Plan,
@@ -116,6 +116,7 @@ __all__ = [
     "OperationStatus",
     "Allocation",
     "AllocationRequest",
+    "WorklogAllocation",
     "PlanOperation",
     "Plan",
     "Planner",
@@ -123,7 +124,6 @@ __all__ = [
     "ValidationError",
     "InvalidDateError",
     "WeekendAllocationError",
-    "OverCapacityError",
     "UnassignedIssueError",
     "AmbiguousIssueError",
     "DuplicateOperationError",

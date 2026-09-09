@@ -1,8 +1,9 @@
 import json
+import logging
 from typing import Any, TypeVar
-from pydantic import BaseModel
 
 import httpx
+from pydantic import ValidationError
 
 from lazytrack.ai.base import (
     AIError,
@@ -14,14 +15,24 @@ from lazytrack.ai.base import (
     AIProviderUnavailableError,
 )
 
-T = TypeVar("T", bound=BaseModel)
+logger = logging.getLogger(__name__)
 
+# Available MiniMax models:
+# - MiniMax-M2.7 (recommended, 204K context, ~60 TPS)
+# - MiniMax-M2.7-highspeed (faster, ~100 TPS)
+# - MiniMax-M2.5 (good balance)
+# - MiniMax-M2.5-highspeed (faster)
+# - MiniMax-M2.1 (cost-effective)
+# - MiniMax-M2.1-highspeed (faster)
+# - MiniMax-M2 (coding/agent focused)
+
+T = TypeVar("T", bound=Any)
 
 class MiniMaxProvider(AIProvider[T]):
-    def __init__(self, api_key: str, model: str = "MiniMax-Text-01"):
+    def __init__(self, api_key: str, model: str = "MiniMax-M2.7"):
         self.api_key = api_key
         self.model = model
-        self.base_url = "https://api.minimax.chat/v1"
+        self.base_url = "https://api.minimax.cn/v1"
 
     def name(self) -> str:
         return "minimax"
@@ -58,23 +69,32 @@ class MiniMaxProvider(AIProvider[T]):
                 f"{json.dumps(schema_example, indent=2)}"
             )
             messages[0]["content"] = prompt_with_schema
+            logger.debug(f"[MiniMax] Using schema: {schema.__name__}")
 
+        logger.debug(f"[MiniMax] Sending request to {url}")
+        
         try:
             async with httpx.AsyncClient(timeout=60.0) as client:
                 response = await client.post(url, json=payload, headers=headers)
         except httpx.TimeoutException as e:
+            logger.error(f"[MiniMax] Timeout: {e}")
             raise AITimeoutError(f"Request timed out: {e}")
         except httpx.RequestError as e:
+            logger.error(f"[MiniMax] Request error: {e}")
             raise AIProviderUnavailableError(f"Provider unavailable: {e}")
 
         if response.status_code == 401:
+            logger.error("[MiniMax] Authentication failed")
             raise AIAuthenticationError("Invalid MiniMax API key")
         elif response.status_code == 429:
+            logger.warning("[MiniMax] Rate limited")
             raise AIRateLimitError("Rate limit exceeded")
         elif response.status_code >= 500:
+            logger.error(f"[MiniMax] Server error: {response.status_code}")
             raise AIProviderUnavailableError(f"MiniMax server error: {response.status_code}")
 
         if response.status_code != 200:
+            logger.error(f"[MiniMax] Unexpected status: {response.status_code}")
             raise AIError(f"Unexpected response: {response.status_code}")
 
         data = response.json()
@@ -83,15 +103,30 @@ class MiniMaxProvider(AIProvider[T]):
             choices = data.get("choices", [{}])
             text = choices[0].get("message", {}).get("content", "")
         except (KeyError, IndexError) as e:
+            logger.error(f"[MiniMax] Invalid response structure: {e}, data={data}")
             raise AIInvalidResponseError(f"Invalid response structure: {e}")
+
+        logger.debug(f"[MiniMax] Raw response: {text[:200]}...")
 
         if schema:
             try:
                 parsed = json.loads(text)
+                logger.debug(f"[MiniMax] Parsed JSON: {parsed}")
                 return schema.model_validate(parsed)
             except json.JSONDecodeError as e:
-                raise AIInvalidResponseError(f"Invalid JSON response: {e}")
+                logger.error(f"[MiniMax] JSON decode error: {e}\nRaw: {text[:500]}")
+                raise AIInvalidResponseError(
+                    f"Invalid JSON response: {e}\n"
+                    f"Raw response: {text[:500]}"
+                )
+            except ValidationError as e:
+                logger.error(f"[MiniMax] Validation error: {e}\nParsed: {parsed}")
+                raise AIInvalidResponseError(
+                    f"Failed to parse structured response: {e}\n"
+                    f"Parsed response: {parsed}"
+                )
             except Exception as e:
+                logger.error(f"[MiniMax] Unexpected error: {type(e).__name__}: {e}")
                 raise AIInvalidResponseError(f"Failed to parse structured response: {e}")
 
         return text

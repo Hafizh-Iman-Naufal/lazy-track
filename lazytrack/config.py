@@ -16,6 +16,7 @@ class WorkConfig(BaseModel):
     working_days: list[str] = ["mon", "tue", "wed", "thu", "fri"]
     weekend_days: list[str] = ["sat", "sun"]
     timezone: str = "UTC"
+    day_start: str = "10:00"
     overtime: WorkOvertimeConfig = Field(default_factory=WorkOvertimeConfig)
 
     @field_validator("hours_per_day", "weekly_target")
@@ -33,6 +34,19 @@ class WorkConfig(BaseModel):
             if day.lower() not in valid_days:
                 raise ValueError(f"Invalid day: {day}")
         return [d.lower() for d in v]
+
+    @field_validator("day_start")
+    @classmethod
+    def validate_day_start(cls, v):
+        parts = str(v).strip().replace(".", ":").split(":")
+        try:
+            hour = int(parts[0])
+            minute = int(parts[1]) if len(parts) > 1 else 0
+        except (ValueError, IndexError) as e:
+            raise ValueError("day_start must be HH:MM") from e
+        if not (0 <= hour <= 23 and 0 <= minute <= 59):
+            raise ValueError("day_start must be a valid time (00:00–23:59)")
+        return f"{hour:02d}:{minute:02d}"
 
 
 class JiraConfig(BaseModel):
@@ -68,6 +82,9 @@ class SafetyConfig(BaseModel):
     allow_worklog_create: bool = True
     allow_worklog_update: bool = True
     allow_worklog_delete: bool = True
+    worklog_lookback_weeks: int = Field(default=4, ge=1, le=8)
+    max_plan_span_days: int = Field(default=14, ge=1, le=31)
+    max_delete_ops_per_plan: int = Field(default=20, ge=1, le=50)
 
 
 class LazyTrackConfig(BaseModel):

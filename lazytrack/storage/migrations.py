@@ -138,6 +138,69 @@ def _migration_9(conn: sqlite3.Connection):
     """)
 
 
+def _migration_10(conn: sqlite3.Connection):
+    cols = [row[1] for row in conn.execute("PRAGMA table_info(plan_operations)").fetchall()]
+    if "started_at" not in cols:
+        conn.execute("ALTER TABLE plan_operations ADD COLUMN started_at TEXT")
+
+
+def _migration_11(conn: sqlite3.Connection):
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS plan_operations_new (
+            id TEXT PRIMARY KEY,
+            plan_id TEXT NOT NULL,
+            operation_type TEXT NOT NULL,
+            issue_key TEXT NOT NULL,
+            work_date TEXT NOT NULL,
+            seconds INTEGER NOT NULL,
+            existing_worklog_id TEXT,
+            status TEXT NOT NULL DEFAULT 'pending',
+            started_at TEXT,
+            FOREIGN KEY (plan_id) REFERENCES plans(id)
+        )
+    """)
+    conn.execute("""
+        INSERT INTO plan_operations_new
+        SELECT CAST(id AS TEXT), plan_id, operation_type, issue_key,
+               work_date, seconds, existing_worklog_id, status, started_at
+        FROM plan_operations
+    """)
+    conn.execute("DROP TABLE plan_operations")
+    conn.execute("ALTER TABLE plan_operations_new RENAME TO plan_operations")
+
+
+def _migration_12(conn: sqlite3.Connection):
+    conn.execute("ALTER TABLE calendar_exceptions RENAME TO calendar_exceptions_old")
+    conn.execute("""
+        CREATE TABLE calendar_exceptions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            date TEXT NOT NULL,
+            exception_type TEXT NOT NULL,
+            hours REAL DEFAULT 0,
+            description TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(date, exception_type)
+        )
+    """)
+    conn.execute("""
+        INSERT INTO calendar_exceptions
+            (id, date, exception_type, hours, description, created_at)
+        SELECT id, date, exception_type, hours, description, created_at
+        FROM calendar_exceptions_old
+    """)
+    conn.execute("DROP TABLE calendar_exceptions_old")
+    conn.execute("""
+        CREATE TABLE plan_overtime (
+            plan_id TEXT NOT NULL,
+            date TEXT NOT NULL,
+            hours REAL NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            PRIMARY KEY (plan_id, date),
+            FOREIGN KEY (plan_id) REFERENCES plans(id)
+        )
+    """)
+
+
 MIGRATIONS: list[Migration] = [
     Migration(version=1, upgrade=_migration_1, downgrade=lambda c: None),
     Migration(version=2, upgrade=_migration_2, downgrade=lambda c: None),
@@ -148,4 +211,7 @@ MIGRATIONS: list[Migration] = [
     Migration(version=7, upgrade=_migration_7, downgrade=lambda c: None),
     Migration(version=8, upgrade=_migration_8, downgrade=lambda c: None),
     Migration(version=9, upgrade=_migration_9, downgrade=lambda c: None),
+    Migration(version=10, upgrade=_migration_10, downgrade=lambda c: None),
+    Migration(version=11, upgrade=_migration_11, downgrade=lambda c: None),
+    Migration(version=12, upgrade=_migration_12, downgrade=lambda c: None),
 ]

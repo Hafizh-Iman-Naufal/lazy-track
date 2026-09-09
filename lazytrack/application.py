@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Optional
 
@@ -9,10 +9,41 @@ from lazytrack.domain import (
     OperationType,
     Plan,
     PlanOperation,
+    OvertimeEntry,
 )
+from lazytrack.domain.tz import now_in_zone
+from lazytrack.domain.window import write_date_ok
 from lazytrack.jira import JiraClient, WorklogWriter
 from lazytrack.jira.models import WorklogEntry
-from lazytrack.storage import Database, AuditRepository, PlanRepository
+from lazytrack.storage import (
+    AuditRepository,
+    CalendarRepository,
+    Database,
+    PlanRepository,
+    WorklogCacheRepository,
+)
+
+
+def _parse_created_at(value) -> date:
+    if not value:
+        return date.today()
+    try:
+        return date.fromisoformat(str(value).split()[0][:10])
+    except ValueError:
+        return date.today()
+
+
+def _parse_started_at(row) -> Optional[datetime]:
+    try:
+        value = row["started_at"]
+    except (KeyError, IndexError):
+        return None
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
 
 
 @dataclass
@@ -28,6 +59,45 @@ class UndoConflictError(Exception):
     pass
 
 
+def _block_write_ops(config: LazyTrackConfig, operations: list, undo: bool = False) -> Optional[str]:
+    safety = config.safety
+    today = now_in_zone(config.work.timezone).date()
+    if undo:
+        delete_count = sum(
+            1 for op in operations if op.operation_type == OperationType.CREATE_WORKLOG
+        )
+        if delete_count and not safety.allow_worklog_delete:
+            return "blocked_by_safety_config"
+        if delete_count > safety.max_delete_ops_per_plan:
+            return "blocked_too_many_deletes"
+    else:
+        types = {op.operation_type for op in operations}
+        if OperationType.CREATE_WORKLOG in types and not safety.allow_worklog_create:
+            return "blocked_by_safety_config"
+        if OperationType.DELETE_WORKLOG in types and not safety.allow_worklog_delete:
+            return "blocked_by_safety_config"
+        if (
+            {OperationType.UPDATE_WORKLOG, OperationType.MOVE_WORKLOG} & types
+            and not safety.allow_worklog_update
+        ):
+            return "blocked_by_safety_config"
+        delete_count = sum(
+            1 for op in operations if op.operation_type == OperationType.DELETE_WORKLOG
+        )
+        if delete_count > safety.max_delete_ops_per_plan:
+            return "blocked_too_many_deletes"
+
+    for op in operations:
+        if not write_date_ok(
+            op.work_date,
+            today,
+            safety.worklog_lookback_weeks,
+            safety.max_plan_span_days,
+        ):
+            return "blocked_outside_worklog_window"
+    return None
+
+
 class UndoExecutor:
     def __init__(
         self,
@@ -39,7 +109,11 @@ class UndoExecutor:
         self.config = config
         self.plan_repo = PlanRepository(db.connect())
         self.audit_repo = AuditRepository(db.connect())
-        self.writer = WorklogWriter(jira_client)
+        self.writer = WorklogWriter(
+            jira_client,
+            timezone=config.work.timezone,
+            day_start=config.work.day_start,
+        )
 
     def check_for_conflicts(self, plan_id: str) -> list[str]:
         conflicts = []
@@ -106,14 +180,25 @@ class UndoExecutor:
                 seconds=row["seconds"],
                 existing_worklog_id=row["existing_worklog_id"],
                 status=OperationStatus(row["status"]),
+                started_at=_parse_started_at(row),
             )
             operations.append(op)
+
+        blocked = _block_write_ops(self.config, operations, undo=True)
+        if blocked:
+            return ExecutionResult(
+                plan_id=plan_id,
+                status=blocked,
+                operations_completed=0,
+                operations_failed=0,
+            )
 
         self.plan_repo.save_plan(plan_id, "undoing")
 
         completed = 0
         failed = 0
         failed_ops = []
+        cache = WorklogCacheRepository(conn)
 
         for op in reversed(operations):
             if op.operation_type == OperationType.CREATE_WORKLOG:
@@ -124,14 +209,16 @@ class UndoExecutor:
                 
                 if managed:
                     try:
+                        jira_id = managed["jira_worklog_id"]
                         self.writer.delete_worklog(
-                            worklog_id=managed["jira_worklog_id"],
+                            worklog_id=jira_id,
                             issue_key=op.issue_key,
                         )
                         conn.execute(
-                            "DELETE FROM managed_worklogs WHERE id = ?",
-                            (managed["id"],)
+                            "DELETE FROM managed_worklogs WHERE jira_worklog_id = ?",
+                            (jira_id,)
                         )
+                        cache.delete_id(jira_id)
                         conn.commit()
                         completed += 1
                     except Exception as e:
@@ -168,7 +255,11 @@ class PlanExecutor:
         self.config = config
         self.plan_repo = PlanRepository(db.connect())
         self.audit_repo = AuditRepository(db.connect())
-        self.writer = WorklogWriter(jira_client)
+        self.writer = WorklogWriter(
+            jira_client,
+            timezone=config.work.timezone,
+            day_start=config.work.day_start,
+        )
 
     def execute_plan(self, plan_id: str, dry_run: bool = False) -> ExecutionResult:
         plan_data = self.plan_repo.get_plan(plan_id)
@@ -184,14 +275,6 @@ class PlanExecutor:
             return ExecutionResult(
                 plan_id=plan_id,
                 status=f"invalid_status: {plan_data['status']}",
-                operations_completed=0,
-                operations_failed=0,
-            )
-
-        if not self._check_safety_config():
-            return ExecutionResult(
-                plan_id=plan_id,
-                status="blocked_by_safety_config",
                 operations_completed=0,
                 operations_failed=0,
             )
@@ -212,8 +295,18 @@ class PlanExecutor:
                 seconds=row["seconds"],
                 existing_worklog_id=row["existing_worklog_id"],
                 status=OperationStatus(row["status"]),
+                started_at=_parse_started_at(row),
             )
             operations.append(op)
+
+        blocked = _block_write_ops(self.config, operations)
+        if blocked:
+            return ExecutionResult(
+                plan_id=plan_id,
+                status=blocked,
+                operations_completed=0,
+                operations_failed=0,
+            )
 
         self.plan_repo.save_plan(plan_id, "applying")
 
@@ -225,6 +318,7 @@ class PlanExecutor:
             for op in operations:
                 if op.status == OperationStatus.PENDING:
                     completed += 1
+            self.plan_repo.save_plan(plan_id, "validated", plan_data["summary"] or "")
             return ExecutionResult(
                 plan_id=plan_id,
                 status="dry_run_success",
@@ -255,6 +349,34 @@ class PlanExecutor:
                     failed_operations=failed_ops,
                 )
 
+        try:
+            calendar_repo = CalendarRepository(conn)
+            existing_overtime = {
+                item.date: item for item in calendar_repo.get_all_overtime()
+            }
+            for overtime in self._load_overtime(plan_id):
+                existing = existing_overtime.get(overtime.date)
+                calendar_repo.add_overtime(
+                    OvertimeEntry(
+                        date=overtime.date,
+                        hours=overtime.hours + (existing.hours if existing else Decimal("0")),
+                    )
+                )
+                conn.execute(
+                    "UPDATE plan_overtime SET status = 'success' WHERE plan_id = ? AND date = ?",
+                    (plan_id, overtime.date.isoformat()),
+                )
+            conn.commit()
+        except Exception as exc:
+            self.plan_repo.save_plan(plan_id, "failed")
+            return ExecutionResult(
+                plan_id=plan_id,
+                status="partial_failure",
+                operations_completed=completed,
+                operations_failed=1,
+                failed_operations=[f"REGISTER_OVERTIME: {exc}"],
+            )
+
         self.plan_repo.save_plan(plan_id, "applied")
 
         self.audit_repo.log(
@@ -279,6 +401,7 @@ class PlanExecutor:
                 work_date=op.work_date,
                 seconds=op.seconds,
                 plan_id=op.plan_id,
+                started_at=op.started_at,
             )
             conn.execute(
                 """
@@ -287,6 +410,7 @@ class PlanExecutor:
                 """,
                 (worklog.id, op.issue_key, op.plan_id, op.id),
             )
+            WorklogCacheRepository(conn).upsert(worklog)
             conn.commit()
 
         elif op.operation_type == OperationType.DELETE_WORKLOG:
@@ -298,13 +422,11 @@ class PlanExecutor:
                 "DELETE FROM managed_worklogs WHERE jira_worklog_id = ?",
                 (op.existing_worklog_id,)
             )
+            WorklogCacheRepository(conn).delete_id(op.existing_worklog_id)
             conn.commit()
 
     def _check_safety_config(self) -> bool:
-        safety = self.config.safety
-        if not safety.allow_worklog_create:
-            return False
-        return True
+        return self.config.safety.allow_worklog_create
 
     def save_plan(self, plan: Plan) -> None:
         self.plan_repo.save_plan(plan.id, plan.status, plan.summary)
@@ -314,8 +436,8 @@ class PlanExecutor:
             conn.execute(
                 """
                 INSERT OR REPLACE INTO plan_operations 
-                (id, plan_id, operation_type, issue_key, work_date, seconds, existing_worklog_id, status)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                (id, plan_id, operation_type, issue_key, work_date, seconds, existing_worklog_id, status, started_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     op.id,
@@ -326,7 +448,16 @@ class PlanExecutor:
                     op.seconds,
                     op.existing_worklog_id,
                     op.status.value,
+                    op.started_at.isoformat() if op.started_at else None,
                 ),
+            )
+        for overtime in plan.overtime:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO plan_overtime (plan_id, date, hours, status)
+                VALUES (?, ?, ?, 'pending')
+                """,
+                (plan.id, overtime.date.isoformat(), float(overtime.hours)),
             )
         conn.commit()
 
@@ -351,13 +482,29 @@ class PlanExecutor:
                 seconds=row["seconds"],
                 existing_worklog_id=row["existing_worklog_id"],
                 status=OperationStatus(row["status"]),
+                started_at=_parse_started_at(row),
             )
             operations.append(op)
+        overtime = self._load_overtime(plan_id)
 
         return Plan(
             id=plan_id,
-            created_at=date.fromisoformat(plan_data["created_at"]),
+            created_at=_parse_created_at(plan_data["created_at"]),
             operations=operations,
             status=plan_data["status"],
             summary=plan_data["summary"] or "",
+            overtime=overtime,
         )
+
+    def _load_overtime(self, plan_id: str) -> list[OvertimeEntry]:
+        rows = self.db.connect().execute(
+            "SELECT date, hours FROM plan_overtime WHERE plan_id = ? ORDER BY date",
+            (plan_id,),
+        ).fetchall()
+        return [
+            OvertimeEntry(
+                date=date.fromisoformat(row["date"]),
+                hours=Decimal(str(row["hours"])),
+            )
+            for row in rows
+        ]

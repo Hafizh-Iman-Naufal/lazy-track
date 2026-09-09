@@ -20,7 +20,22 @@ def test_cli_help():
         text=True,
     )
     assert result.returncode == 0
-    assert "lazytrack" in result.stdout.lower()
+    out = result.stdout.lower()
+    assert "lazytrack" in out
+    assert "chat" in out
+    assert "sync" in out
+    assert "overtime" not in out
+
+
+def test_chat_help():
+    result = subprocess.run(
+        [sys.executable, "-m", "lazytrack.cli", "chat", "--help"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    assert "/help" in result.stdout
+    assert "overtime" not in result.stdout.lower()
 
 
 def test_cli_version():

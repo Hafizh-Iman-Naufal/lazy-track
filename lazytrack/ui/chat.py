@@ -1,18 +1,18 @@
-from datetime import date, timedelta
+from dataclasses import dataclass
+from datetime import date, time, timedelta
 from decimal import Decimal
+from pathlib import Path
 from typing import Optional
 
 from lazytrack.ai.schemas import (
     AllocationItem,
     AddHolidayIntent,
     AddLeaveIntent,
-    AddOvertimeIntent,
     AllocateTimeIntent,
     ClarificationRequired,
     RemoveAllocationIntent,
     RemoveHolidayIntent,
     RemoveLeaveIntent,
-    RemoveOvertimeIntent,
     ReallocateTimeIntent,
     ShowIssuesIntent,
     ShowWeekIntent,
@@ -23,42 +23,139 @@ from lazytrack.domain import (
     AllocationRequest,
     Planner,
     PlannerContext,
+    WorklogAllocation,
+    ValidationError,
     LeaveEntry,
     HolidayEntry,
     OvertimeEntry,
 )
 from lazytrack.domain.calendar import WorkCalendar
+from lazytrack.domain.planner import parse_hhmm
+from lazytrack.domain.tz import now_in_zone
 from lazytrack.jira.models import IssueSummary, WorklogEntry
+from lazytrack.ui.status import iso_week_id, parse_iso_week
+
+CHAT_HELP = """\
+[bold]LazyTrack Chat[/bold]
+Allocate time (gaps and timezones), show issues or this week, and add leave or holidays.
+Plans preview first. Reply yes to apply, no to cancel, or describe a correction.
+
+[bold]Slash commands[/bold] (no AI):
+  /help     this message
+  /status [YYYY-Www]
+            current or selected week's hours
+  /issues   assigned issues from cache
+  /clear    reset conversation history
+  /exit     quit
+
+Up/down recalls previous lines (saved in ~/.lazytrack).
+Also: help, ?, exit, quit, q
+Sync issues with [cyan]lazytrack sync[/cyan] in another terminal.\
+"""
 
 
-def format_week_status(week_start: date, weekly, logged: Decimal) -> str:
-    lines = [
-        f"Week: {week_start} - {week_start + timedelta(days=4)}",
-        "",
-        f"Required:   {weekly.required_target}h",
-        f"Logged:     {logged}h",
-        f"Unfilled:   {weekly.missing_hours}h",
-    ]
-    return "\n".join(lines)
+def chat_history_path() -> Path:
+    path = Path.home() / ".lazytrack" / "chat_history"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
 
 
-def suggest_missing_hours(week_start: date, calendar: WorkCalendar) -> Optional[str]:
-    missing = calendar.required_hours_for_week(week_start)
+_SLASH = {
+    "help": "help",
+    "?": "help",
+    "status": "status",
+    "issues": "issues",
+    "clear": "clear",
+    "exit": "exit",
+    "quit": "exit",
+    "q": "exit",
+}
 
-    if missing.missing_hours <= 0:
+
+def parse_chat_command(line: str) -> Optional[str]:
+    """Return a local command name, or None to send the line to the AI."""
+    raw = line.strip()
+    if not raw:
+        return None
+    low = raw.lower()
+    if low.startswith("/"):
+        token = low[1:].split()[0] if low[1:] else ""
+        return _SLASH.get(token)
+    if " " in low:
+        return None
+    return _SLASH.get(low)
+
+
+def _parse_gap(start: str, end: str) -> tuple[time, time]:
+    return parse_hhmm(start), parse_hhmm(end)
+
+
+@dataclass
+class ChatSessionState:
+    pending_request: Optional[str] = None
+    pending_plan: object = None
+
+    def clear(self) -> None:
+        self.pending_request = None
+        self.pending_plan = None
+
+
+def confirmation_reply(text: str) -> Optional[bool]:
+    value = text.strip().lower()
+    if value in {"y", "yes", "confirm", "apply"}:
+        return True
+    if value in {"n", "no", "cancel"}:
+        return False
+    return None
+
+
+def parse_status_week(line: str) -> Optional[str]:
+    parts = line.strip().split()
+    if not parts or parts[0].lower() != "/status":
+        return None
+    if len(parts) == 1:
+        return None
+    if len(parts) != 2:
+        raise ValueError("Usage: /status [YYYY-Www]")
+    parse_iso_week(parts[1])
+    return parts[1]
+
+
+def logged_hours_by_date(
+    worklogs: list[WorklogEntry], week_start: date
+) -> dict[date, Decimal]:
+    totals = {week_start + timedelta(days=i): Decimal("0") for i in range(7)}
+    for worklog in worklogs:
+        if worklog.work_date in totals:
+            totals[worklog.work_date] += Decimal(str(worklog.seconds)) / 3600
+    return totals
+
+
+def suggest_missing_hours(
+    week_start: date,
+    calendar: WorkCalendar,
+    logged_by_date: dict[date, Decimal],
+) -> Optional[str]:
+    weekly = calendar.required_hours_for_week(week_start)
+    total_logged = sum(
+        (logged_by_date.get(week_start + timedelta(days=i), Decimal("0")) for i in range(7)),
+        Decimal("0"),
+    )
+    missing = weekly.required_target + weekly.total_overtime - total_logged
+
+    if missing <= 0:
         return None
 
     missing_dates = []
     for i in range(7):
         d = week_start + timedelta(days=i)
-        cap = calendar.capacity_for_date(d)
-        if cap > 0:
+        if calendar.capacity_for_date(d) > logged_by_date.get(d, Decimal("0")):
             missing_dates.append(d.strftime("%A"))
 
     if missing_dates:
         date_list = ", ".join(missing_dates)
         return (
-            f"You still have {missing.missing_hours}h unallocated this week. "
+            f"You still have {missing}h unallocated in {iso_week_id(week_start)}. "
             f"{date_list} need hours. "
             f"Would you like to allocate them?"
         )
@@ -80,9 +177,9 @@ class ChatOrchestrator:
         self.worklogs = worklogs
         self.planner = planner
 
-    def handle_intent(self, intent) -> dict:
+    def handle_intent(self, intent, timezone: Optional[str] = None) -> dict:
         if isinstance(intent, AllocateTimeIntent):
-            return self._handle_allocate(intent)
+            return self._handle_allocate(intent, timezone)
         elif isinstance(intent, ShowWeekIntent):
             return self._handle_show_week(intent)
         elif isinstance(intent, ShowIssuesIntent):
@@ -95,10 +192,6 @@ class ChatOrchestrator:
             return self._handle_add_holiday(intent)
         elif isinstance(intent, RemoveHolidayIntent):
             return self._handle_remove_holiday(intent)
-        elif isinstance(intent, AddOvertimeIntent):
-            return self._handle_add_overtime(intent)
-        elif isinstance(intent, RemoveOvertimeIntent):
-            return self._handle_remove_overtime(intent)
         elif isinstance(intent, ClarificationRequired):
             return {
                 "type": "clarification",
@@ -112,11 +205,15 @@ class ChatOrchestrator:
             }
 
     def get_proactive_suggestion(self) -> Optional[str]:
-        today = date.today()
+        today = now_in_zone(self.config.work.timezone).date()
         week_start = today - timedelta(days=today.weekday())
-        return suggest_missing_hours(week_start, self.calendar)
+        return suggest_missing_hours(
+            week_start,
+            self.calendar,
+            logged_hours_by_date(self.worklogs, week_start),
+        )
 
-    def _handle_allocate(self, intent: AllocateTimeIntent) -> dict:
+    def _handle_allocate(self, intent: AllocateTimeIntent, timezone: Optional[str] = None) -> dict:
         allocations = [
             Allocation(
                 issue_key=a.issue_key,
@@ -125,10 +222,23 @@ class ChatOrchestrator:
             for a in intent.allocations
         ]
 
+        worklogs = [
+            WorklogAllocation(
+                work_date=item.date,
+                issue_key=item.issue_key,
+                hours=Decimal(str(item.hours)),
+                start_time=parse_hhmm(item.start_time) if item.start_time else None,
+            )
+            for item in intent.worklogs
+        ]
+        dates = [item.work_date for item in worklogs]
         request = AllocationRequest(
-            start_date=intent.start_date,
-            end_date=intent.end_date,
+            start_date=min(dates) if dates else intent.start_date,
+            end_date=max(dates) if dates else intent.end_date,
             allocations=allocations,
+            gaps=[_parse_gap(g.start, g.end) for g in intent.gaps],
+            timezone=timezone or self.config.work.timezone,
+            worklogs=worklogs,
         )
 
         try:
@@ -140,39 +250,64 @@ class ChatOrchestrator:
                 "preview": preview,
                 "message": "Proposed allocation",
             }
+        except ValidationError as e:
+            return {
+                "type": "clarification",
+                "message": f"{e}. What should I use instead?",
+                "missing": [],
+            }
         except Exception as e:
             return {
                 "type": "error",
                 "message": str(e),
             }
 
+    def record_applied_plan(self, plan) -> None:
+        for op in plan.operations:
+            worklog = WorklogEntry(
+                id=f"{plan.id}:{op.id}",
+                issue_key=op.issue_key,
+                work_date=op.work_date,
+                seconds=op.seconds,
+                author_is_current_user=True,
+                managed_by_lazytrack=True,
+                plan_id=plan.id,
+            )
+            self.worklogs.append(worklog)
+            if self.planner.context.user_worklogs is not self.worklogs:
+                self.planner.context.user_worklogs.append(worklog)
+        for overtime in plan.overtime:
+            current = self.calendar.overtime.get(overtime.date)
+            hours = overtime.hours + (current.hours if current else Decimal("0"))
+            self.calendar.add_overtime(OvertimeEntry(date=overtime.date, hours=hours))
+
     def _handle_show_week(self, intent: ShowWeekIntent) -> dict:
         if intent.week:
             try:
-                year, week_num = intent.week.split("-W")
-                week_start = date.fromisocalendar(int(year), int(week_num), 1)
-            except (ValueError, AttributeError):
+                week_start = parse_iso_week(intent.week)
+            except ValueError:
                 return {
                     "type": "error",
                     "message": f"Invalid week format: {intent.week}. Use YYYY-Www",
                 }
         else:
-            today = date.today()
+            today = now_in_zone(self.config.work.timezone).date()
             week_start = today - timedelta(days=today.weekday())
 
         weekly = self.calendar.required_hours_for_week(week_start)
-        logged = sum(
-            Decimal(str(w.seconds)) / 3600
-            for w in self.worklogs
-            if week_start <= w.work_date <= week_start + timedelta(days=6)
-        )
+        logged_by_date = logged_hours_by_date(self.worklogs, week_start)
+        logged = sum(logged_by_date.values(), Decimal("0"))
 
         return {
             "type": "week_status",
             "week_start": week_start,
             "weekly": weekly,
+            "logged_by_date": logged_by_date,
             "logged": logged,
-            "missing": weekly.missing_hours,
+            "missing": max(
+                Decimal("0"),
+                weekly.required_target + weekly.total_overtime - logged,
+            ),
         }
 
     def _handle_show_issues(self, intent: ShowIssuesIntent) -> dict:
@@ -223,22 +358,3 @@ class ChatOrchestrator:
             "message": f"No holiday entry found for {intent.date}",
         }
 
-    def _handle_add_overtime(self, intent: AddOvertimeIntent) -> dict:
-        ot = OvertimeEntry(date=intent.date, hours=Decimal(str(intent.hours)))
-        self.calendar.add_overtime(ot)
-        return {
-            "type": "success",
-            "message": f"Overtime added for {intent.date}: {intent.hours}h",
-        }
-
-    def _handle_remove_overtime(self, intent: RemoveOvertimeIntent) -> dict:
-        removed = self.calendar.remove_overtime(intent.date)
-        if removed:
-            return {
-                "type": "success",
-                "message": f"Overtime removed for {intent.date}",
-            }
-        return {
-            "type": "info",
-            "message": f"No overtime entry found for {intent.date}",
-        }

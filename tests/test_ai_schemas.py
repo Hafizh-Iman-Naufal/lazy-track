@@ -4,6 +4,7 @@ from pydantic import ValidationError
 
 from lazytrack.ai.schemas import (
     IntentType,
+    IntentSchema,
     AllocationItem,
     AllocateTimeIntent,
     ReallocateTimeIntent,
@@ -12,7 +13,6 @@ from lazytrack.ai.schemas import (
     AddLeaveIntent,
     RemoveLeaveIntent,
     AddHolidayIntent,
-    AddOvertimeIntent,
     ClarificationRequired,
 )
 
@@ -86,16 +86,6 @@ class TestAddLeaveIntent:
             AddLeaveIntent(date=date(2026, 9, 10), hours=25)
 
 
-class TestAddOvertimeIntent:
-    def test_valid_overtime(self):
-        intent = AddOvertimeIntent(date=date(2026, 9, 4), hours=2.0)
-        assert intent.hours == 2.0
-
-    def test_invalid_overtime(self):
-        with pytest.raises(ValidationError):
-            AddOvertimeIntent(date=date(2026, 9, 4), hours=0)
-
-
 class TestClarificationRequired:
     def test_clarification_required(self):
         intent = ClarificationRequired(
@@ -104,3 +94,62 @@ class TestClarificationRequired:
         )
         assert intent.type == "clarification_required"
         assert "Ambiguous" in intent.reason
+
+
+class TestIntentSchemaCaseInsensitive:
+    """Test that IntentSchema handles AI responses with various type formats."""
+    
+    def test_clarification_required_pascal_case(self):
+        """AI returns ClarificationRequired (PascalCase) - should parse correctly."""
+        data = {"type": "ClarificationRequired", "reason": "ambiguous request"}
+        intent = IntentSchema.model_validate(data)
+        assert isinstance(intent, ClarificationRequired)
+        assert intent.type == "clarification_required"
+    
+    def test_clarification_required_snake_case(self):
+        """AI returns clarification_required (snake_case)."""
+        data = {"type": "clarification_required", "reason": "ambiguous request"}
+        intent = IntentSchema.model_validate(data)
+        assert isinstance(intent, ClarificationRequired)
+    
+    def test_show_issues_snake_case(self):
+        """AI returns show_issues (snake_case)."""
+        data = {"type": "show_issues"}
+        intent = IntentSchema.model_validate(data)
+        assert isinstance(intent, ShowIssuesIntent)
+
+    def test_view_assigned_issues_alias(self):
+        """AI returns view_assigned_issues - should map to ShowIssuesIntent."""
+        data = {"type": "view_assigned_issues"}
+        intent = IntentSchema.model_validate(data)
+        assert isinstance(intent, ShowIssuesIntent)
+        assert intent.type == "show_issues"
+
+    def test_clarification_required_no_reason_uses_default(self):
+        """ClarificationRequired without reason field should not raise."""
+        data = {"type": "clarification_required"}
+        intent = IntentSchema.model_validate(data)
+        assert isinstance(intent, ClarificationRequired)
+        assert intent.reason == "Request requires clarification"
+    
+    def test_allocate_time_variations(self):
+        """Test allocate_time variations (snake_case and PascalCase with Intent suffix)."""
+        for type_val in ["allocate_time", "AllocateTimeIntent", "allocate"]:
+            data = {"type": type_val, "start_date": "2026-09-01", "end_date": "2026-09-05", "allocations": []}
+            intent = IntentSchema.model_validate(data)
+            assert isinstance(intent, AllocateTimeIntent)
+    
+    def test_invalid_type_raises_error(self):
+        """Invalid type should raise ValueError."""
+        data = {"type": "invalid_type"}
+        with pytest.raises(ValidationError) as exc_info:
+            IntentSchema.model_validate(data)
+        assert "Unknown intent type" in str(exc_info.value)
+    
+    def test_clarification_required_missing_reason_gets_default(self):
+        """AI returns ClarificationRequired without reason - should get default."""
+        data = {"type": "ClarificationRequired"}
+        intent = IntentSchema.model_validate(data)
+        assert isinstance(intent, ClarificationRequired)
+        assert intent.reason == "Request requires clarification"
+        assert intent.missing_fields == []

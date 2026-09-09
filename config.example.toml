@@ -3,11 +3,8 @@ hours_per_day = 8
 weekly_target = 40
 working_days = ["mon", "tue", "wed", "thu", "fri"]
 weekend_days = ["sat", "sun"]
-timezone = "UTC"
-
-[work.overtime]
-enabled = true
-default_hours = 0
+timezone = "UTC"  # use Asia/Makassar for WITA
+day_start = "10:00"  # first worklog start, local to timezone
 
 [jira]
 base_url = ""
@@ -33,3 +30,6 @@ allow_issue_mutations = false
 allow_worklog_create = true
 allow_worklog_update = true
 allow_worklog_delete = true
+worklog_lookback_weeks = 4
+max_plan_span_days = 14
+max_delete_ops_per_plan = 20

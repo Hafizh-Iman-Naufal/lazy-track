@@ -52,7 +52,7 @@ class WorkCalendar:
         if d in self.leaves:
             leave_hours = self.leaves[d].hours
 
-        if d in self.overtime and not is_weekend:
+        if d in self.overtime:
             approved_overtime = self.overtime[d].hours
 
         return DailyCapacity(
@@ -81,7 +81,7 @@ class WorkCalendar:
             cap = self._daily_capacity(d)
             if self._is_working_day(d):
                 required_target += cap.required_capacity
-                total_overtime += cap.approved_overtime
+            total_overtime += cap.approved_overtime
 
         return WeeklyCapacity(
             week_start=week_start,

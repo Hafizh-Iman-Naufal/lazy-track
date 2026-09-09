@@ -121,6 +121,50 @@ class CalendarRepository:
             for row in cursor.fetchall()
         ]
 
+    def add_overtime(self, overtime: OvertimeEntry) -> bool:
+        self.conn.execute(
+            """
+            INSERT INTO calendar_exceptions (date, exception_type, hours, description)
+            VALUES (?, 'overtime', ?, ?)
+            ON CONFLICT(date, exception_type) DO UPDATE SET
+                hours = excluded.hours,
+                description = excluded.description
+            """,
+            (
+                overtime.date.isoformat(),
+                float(overtime.hours),
+                overtime.description,
+            ),
+        )
+        self.conn.commit()
+        return True
+
+    def remove_overtime(self, d: date) -> bool:
+        cursor = self.conn.execute(
+            "DELETE FROM calendar_exceptions WHERE date = ? AND exception_type = 'overtime'",
+            (d.isoformat(),),
+        )
+        self.conn.commit()
+        return cursor.rowcount > 0
+
+    def get_all_overtime(self) -> list[OvertimeEntry]:
+        cursor = self.conn.execute(
+            """
+            SELECT date, hours, description
+            FROM calendar_exceptions
+            WHERE exception_type = 'overtime'
+            ORDER BY date
+            """
+        )
+        return [
+            OvertimeEntry(
+                date=date.fromisoformat(row["date"]),
+                hours=Decimal(str(row["hours"])),
+                description=row["description"],
+            )
+            for row in cursor.fetchall()
+        ]
+
 
 class PlanRepository:
     def __init__(self, conn: sqlite3.Connection):
@@ -202,3 +246,68 @@ class AuditRepository:
                 r["after_json"] = json.loads(r["after_json"])
             rows.append(r)
         return rows
+
+
+class WorklogCacheRepository:
+    def __init__(self, conn: sqlite3.Connection):
+        self.conn = conn
+
+    def replace_window(self, rows: list, start: date, end: date) -> int:
+        from lazytrack.domain.window import MAX_CACHE_WINDOW_DAYS
+
+        if start > end:
+            raise ValueError("cache window start is after end")
+        if (end - start).days > MAX_CACHE_WINDOW_DAYS:
+            raise ValueError(
+                f"cache window {(end - start).days} days exceeds max {MAX_CACHE_WINDOW_DAYS}"
+            )
+
+        self.conn.execute(
+            """
+            DELETE FROM worklog_cache
+            WHERE author = 'current_user' AND work_date >= ? AND work_date <= ?
+            """,
+            (start.isoformat(), end.isoformat()),
+        )
+        for wl in rows:
+            self.conn.execute(
+                """
+                INSERT OR REPLACE INTO worklog_cache
+                (id, issue_key, work_date, seconds, author, managed_by_lazytrack)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    wl.id,
+                    wl.issue_key,
+                    wl.work_date.isoformat(),
+                    wl.seconds,
+                    "current_user",
+                    1 if wl.managed_by_lazytrack else 0,
+                ),
+            )
+        self.conn.commit()
+        return len(rows)
+
+    def upsert(self, wl) -> None:
+        self.conn.execute(
+            """
+            INSERT OR REPLACE INTO worklog_cache
+            (id, issue_key, work_date, seconds, author, managed_by_lazytrack, plan_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                wl.id,
+                wl.issue_key,
+                wl.work_date.isoformat(),
+                wl.seconds,
+                "current_user",
+                1 if wl.managed_by_lazytrack else 0,
+                wl.plan_id,
+            ),
+        )
+        self.conn.commit()
+
+    def delete_id(self, worklog_id: str) -> None:
+        self.conn.execute("DELETE FROM worklog_cache WHERE id = ?", (worklog_id,))
+        self.conn.commit()
+

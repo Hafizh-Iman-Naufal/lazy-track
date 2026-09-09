@@ -53,21 +53,25 @@ class RestrictiveJiraGateway:
     async def get_worklogs_for_issue(
         self,
         issue_key: str,
+        timezone: str = "UTC",
     ) -> list[WorklogEntry]:
         return await get_worklogs_for_issue(
             self._client,
             issue_key,
             self._current_user_key,
+            timezone,
         )
 
     async def get_worklogs_for_user(
         self,
         start_date: Optional[date] = None,
         end_date: Optional[date] = None,
+        timezone: str = "UTC",
     ) -> list[WorklogEntry]:
         return await get_worklogs_for_user(
             self._client,
             self._current_user_key,
             start_date,
             end_date,
+            timezone,
         )

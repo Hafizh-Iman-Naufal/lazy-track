@@ -2,7 +2,7 @@ from datetime import date
 from enum import Enum
 from typing import Optional, Union, Annotated, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class IntentType(str, Enum):
@@ -11,12 +11,11 @@ class IntentType(str, Enum):
     REMOVE_ALLOCATION = "remove_allocation"
     SHOW_WEEK = "show_week"
     SHOW_ISSUES = "show_issues"
+    VIEW_ASSIGNED_ISSUES = "view_assigned_issues"
     ADD_LEAVE = "add_leave"
     REMOVE_LEAVE = "remove_leave"
     ADD_HOLIDAY = "add_holiday"
     REMOVE_HOLIDAY = "remove_holiday"
-    ADD_OVERTIME = "add_overtime"
-    REMOVE_OVERTIME = "remove_overtime"
     CLARIFICATION_REQUIRED = "clarification_required"
 
 
@@ -25,18 +24,38 @@ class AllocationItem(BaseModel):
     hours_per_day: float = Field(gt=0, le=24)
 
 
+class WorklogItem(BaseModel):
+    issue_key: str
+    date: date
+    hours: float = Field(gt=0, le=24)
+    start_time: Optional[str] = None
+
+
+class TimeGap(BaseModel):
+    start: str
+    end: str
+
+
 class AllocateTimeIntent(BaseModel):
     type: Literal["allocate_time"] = "allocate_time"
-    start_date: date
-    end_date: date
-    allocations: list[AllocationItem]
+    start_date: Optional[date] = None
+    end_date: Optional[date] = None
+    allocations: list[AllocationItem] = Field(default_factory=list)
+    worklogs: list[WorklogItem] = Field(default_factory=list)
+    gaps: list[TimeGap] = Field(default_factory=list)
 
     @field_validator("end_date")
     @classmethod
     def end_after_start(cls, v, info):
-        if "start_date" in info.data and v < info.data["start_date"]:
+        if v is not None and info.data.get("start_date") is not None and v < info.data["start_date"]:
             raise ValueError("end_date must be after start_date")
         return v
+
+    @model_validator(mode="after")
+    def has_dates_or_worklogs(self):
+        if not self.worklogs and (self.start_date is None or self.end_date is None):
+            raise ValueError("allocate_time requires dates or worklogs")
+        return self
 
 
 class ReallocateTimeIntent(BaseModel):
@@ -85,21 +104,77 @@ class RemoveHolidayIntent(BaseModel):
     date: date
 
 
-class AddOvertimeIntent(BaseModel):
-    type: Literal["add_overtime"] = "add_overtime"
-    date: date
-    hours: float = Field(gt=0, le=24)
-
-
-class RemoveOvertimeIntent(BaseModel):
-    type: Literal["remove_overtime"] = "remove_overtime"
-    date: date
-
-
 class ClarificationRequired(BaseModel):
     type: Literal["clarification_required"] = "clarification_required"
-    reason: str
+    reason: str = ""
     missing_fields: list[str] = Field(default_factory=list)
+
+
+class IntentSchema(BaseModel):
+    type: str
+    start_date: Optional[date] = None
+    end_date: Optional[date] = None
+    allocations: Optional[list[AllocationItem]] = None
+    worklogs: Optional[list[WorklogItem]] = None
+    total_hours: Optional[float] = None
+    gaps: Optional[list[TimeGap]] = None
+    date: Optional[date] = None
+    from_issue_key: Optional[str] = None
+    to_issue_key: Optional[str] = None
+    issue_key: Optional[str] = None
+    hours: Optional[float] = None
+    hours_per_day: Optional[float] = None
+    week: Optional[str] = None
+    description: Optional[str] = None
+    reason: Optional[str] = None
+    missing_fields: Optional[list[str]] = None
+
+    @model_validator(mode="wrap")
+    @classmethod
+    def parse_discriminated_union(cls, values, info):
+        if not isinstance(values, dict):
+            return values
+        raw_type = values.get("type", "")
+        intent_type = raw_type.lower().replace(" ", "_")
+        
+        normalized_values = {**values}
+        
+        if intent_type in ("allocate_time", "allocatetimeintent", "allocate"):
+            normalized_values["type"] = "allocate_time"
+            return AllocateTimeIntent(**normalized_values)
+        elif intent_type in ("reallocate_time", "reallocatetimeintent"):
+            normalized_values["type"] = "reallocate_time"
+            return ReallocateTimeIntent(**normalized_values)
+        elif intent_type in ("remove_allocation", "removeallocationintent"):
+            normalized_values["type"] = "remove_allocation"
+            return RemoveAllocationIntent(**normalized_values)
+        elif intent_type in ("show_week", "showweekintent"):
+            normalized_values["type"] = "show_week"
+            return ShowWeekIntent(**normalized_values)
+        elif intent_type in ("show_issues", "showissuesintent", "view_assigned_issues", "viewassignedissues"):
+            normalized_values["type"] = "show_issues"
+            return ShowIssuesIntent(**normalized_values)
+        elif intent_type in ("add_leave", "addleaveintent"):
+            normalized_values["type"] = "add_leave"
+            return AddLeaveIntent(**normalized_values)
+        elif intent_type in ("remove_leave", "removeleveintent"):
+            normalized_values["type"] = "remove_leave"
+            return RemoveLeaveIntent(**normalized_values)
+        elif intent_type in ("add_holiday", "addholidayintent"):
+            normalized_values["type"] = "add_holiday"
+            return AddHolidayIntent(**normalized_values)
+        elif intent_type in ("remove_holiday", "removeholidayintent"):
+            normalized_values["type"] = "remove_holiday"
+            return RemoveHolidayIntent(**normalized_values)
+        elif intent_type in ("clarification_required", "clarificationrequired"):
+            normalized_values["type"] = "clarification_required"
+            if "reason" not in normalized_values or not normalized_values["reason"]:
+                normalized_values["reason"] = "Request requires clarification"
+            if "missing_fields" not in normalized_values:
+                normalized_values["missing_fields"] = []
+            return ClarificationRequired(**normalized_values)
+        else:
+            raise ValueError(f"Unknown intent type: '{raw_type}' (normalized: '{intent_type}')")
 
 
 UnionIntent = Annotated[
@@ -113,8 +188,6 @@ UnionIntent = Annotated[
         RemoveLeaveIntent,
         AddHolidayIntent,
         RemoveHolidayIntent,
-        AddOvertimeIntent,
-        RemoveOvertimeIntent,
         ClarificationRequired,
     ],
     Field(discriminator="type"),
@@ -123,6 +196,8 @@ UnionIntent = Annotated[
 __all__ = [
     "IntentType",
     "AllocationItem",
+    "WorklogItem",
+    "TimeGap",
     "AllocateTimeIntent",
     "ReallocateTimeIntent",
     "RemoveAllocationIntent",
@@ -132,8 +207,7 @@ __all__ = [
     "RemoveLeaveIntent",
     "AddHolidayIntent",
     "RemoveHolidayIntent",
-    "AddOvertimeIntent",
-    "RemoveOvertimeIntent",
     "ClarificationRequired",
+    "IntentSchema",
     "UnionIntent",
 ]

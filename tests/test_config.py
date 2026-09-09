@@ -41,6 +41,22 @@ class TestWorkConfig:
         config = WorkConfig(working_days=["MON", "TUE"])
         assert config.working_days == ["mon", "tue"]
 
+    def test_default_day_start(self):
+        config = WorkConfig()
+        assert config.day_start == "10:00"
+
+    def test_day_start_normalized(self):
+        config = WorkConfig(day_start="9:05")
+        assert config.day_start == "09:05"
+
+    def test_invalid_day_start_hour(self):
+        with pytest.raises(ValidationError):
+            WorkConfig(day_start="25:00")
+
+    def test_invalid_day_start_text(self):
+        with pytest.raises(ValidationError):
+            WorkConfig(day_start="noon")
+
 
 class TestJiraConfig:
     def test_default_jira_config(self):
@@ -65,6 +81,15 @@ class TestSafetyConfig:
         assert config.allow_worklog_create is True
         assert config.allow_worklog_update is True
         assert config.allow_worklog_delete is True
+        assert config.worklog_lookback_weeks == 4
+        assert config.max_plan_span_days == 14
+        assert config.max_delete_ops_per_plan == 20
+
+    def test_lookback_weeks_clamped(self):
+        with pytest.raises(ValidationError):
+            SafetyConfig(worklog_lookback_weeks=52)
+        with pytest.raises(ValidationError):
+            SafetyConfig(worklog_lookback_weeks=0)
 
 
 class TestLazyTrackConfig:

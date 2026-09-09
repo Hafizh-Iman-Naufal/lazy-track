@@ -1,18 +1,31 @@
 import json
 import tempfile
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
 
 import pytest
 
-from lazytrack.domain import LeaveEntry, HolidayEntry, OvertimeEntry
+from lazytrack.application import PlanExecutor
+from lazytrack.config import LazyTrackConfig
+from lazytrack.domain import (
+    LeaveEntry,
+    HolidayEntry,
+    OvertimeEntry,
+    OperationType,
+    Plan,
+    PlanOperation,
+)
+from lazytrack.domain.planner import generate_operation_id
+from lazytrack.domain.tz import zone_for
 from lazytrack.storage import (
     Database,
     CalendarRepository,
     PlanRepository,
     AuditRepository,
+    WorklogCacheRepository,
 )
+from lazytrack.jira.models import WorklogEntry
 
 
 @pytest.fixture
@@ -132,6 +145,14 @@ class TestCalendarRepository:
         holidays = calendar_repo.get_all_holidays()
         assert len(holidays) == 2
 
+    def test_overtime_can_coexist_with_leave_on_same_date(self, calendar_repo):
+        work_date = date(2026, 9, 10)
+        calendar_repo.add_leave(LeaveEntry(date=work_date, hours=Decimal("4")))
+        calendar_repo.add_overtime(OvertimeEntry(date=work_date, hours=Decimal("2")))
+
+        assert calendar_repo.get_leave(work_date).hours == Decimal("4")
+        assert calendar_repo.get_all_overtime()[0].hours == Decimal("2")
+
 
 class TestPlanRepository:
     def test_save_and_get_plan(self, plan_repo):
@@ -162,6 +183,71 @@ class TestPlanRepository:
         assert plan["summary"] == "Updated plan"
 
 
+class TestPlanExecutorPersistence:
+    def _plan(self):
+        return Plan(
+            id="PL-20260904145727",
+            created_at=date(2026, 9, 4),
+            status="validated",
+            summary="Friday allocation",
+            operations=[
+                PlanOperation(
+                    id=generate_operation_id(),
+                    plan_id="PL-20260904145727",
+                    operation_type=OperationType.CREATE_WORKLOG,
+                    issue_key="SP-8412",
+                    work_date=date(2026, 9, 4),
+                    seconds=14400,
+                    started_at=datetime(2026, 9, 4, 8, 0, tzinfo=zone_for("Asia/Makassar")),
+                ),
+                PlanOperation(
+                    id=generate_operation_id(),
+                    plan_id="PL-20260904145727",
+                    operation_type=OperationType.CREATE_WORKLOG,
+                    issue_key="SP-8412",
+                    work_date=date(2026, 9, 4),
+                    seconds=14400,
+                    started_at=datetime(2026, 9, 4, 13, 0, tzinfo=zone_for("Asia/Makassar")),
+                ),
+            ],
+        )
+
+    def test_save_and_load_plan_with_uuid_operation_ids(self, temp_db):
+        executor = PlanExecutor(temp_db, LazyTrackConfig(), None)
+        plan = self._plan()
+
+        executor.save_plan(plan)
+        loaded = executor.load_plan(plan.id)
+
+        assert loaded is not None
+        assert len(loaded.operations) == 2
+        assert {op.id for op in loaded.operations} == {op.id for op in plan.operations}
+        assert sum(op.seconds for op in loaded.operations) == 28800
+        starts = sorted(op.started_at.strftime("%H:%M") for op in loaded.operations)
+        assert starts == ["08:00", "13:00"]
+
+    def test_load_plan_parses_sqlite_created_at(self, temp_db):
+        executor = PlanExecutor(temp_db, LazyTrackConfig(), None)
+        plan = self._plan()
+        executor.save_plan(plan)
+
+        loaded = executor.load_plan(plan.id)
+
+        assert isinstance(loaded.created_at, date)
+
+    def test_save_and_load_plan_overtime(self, temp_db):
+        executor = PlanExecutor(temp_db, LazyTrackConfig(), None)
+        plan = self._plan()
+        plan.overtime = [
+            OvertimeEntry(date=date(2026, 9, 4), hours=Decimal("2"))
+        ]
+        executor.save_plan(plan)
+
+        loaded = executor.load_plan(plan.id)
+
+        assert loaded.overtime == plan.overtime
+
+
 class TestAuditRepository:
     def test_log_audit_entry(self, audit_repo):
         audit_repo.log(
@@ -188,3 +274,50 @@ class TestAuditRepository:
 
         entries = audit_repo.get_recent(limit=3)
         assert len(entries) == 3
+
+
+class TestWorklogCacheReplace:
+    def test_stale_friday_cleared_old_row_kept(self, temp_db):
+        conn = temp_db.connect()
+        conn.execute(
+            """
+            INSERT INTO worklog_cache (id, issue_key, work_date, seconds, author)
+            VALUES ('old', 'SP-1', '2026-06-01', 28800, 'current_user'),
+                   ('fri', 'SP-8412', '2026-09-04', 28800, 'current_user')
+            """
+        )
+        conn.commit()
+        repo = WorklogCacheRepository(conn)
+        n = repo.replace_window([], date(2026, 8, 3), date(2026, 9, 6))
+        assert n == 0
+        rows = conn.execute(
+            "SELECT id, work_date FROM worklog_cache ORDER BY work_date"
+        ).fetchall()
+        assert [r["id"] for r in rows] == ["old"]
+
+    def test_replace_inserts_fetched_rows(self, temp_db):
+        conn = temp_db.connect()
+        conn.execute(
+            """
+            INSERT INTO worklog_cache (id, issue_key, work_date, seconds, author)
+            VALUES ('fri', 'SP-8412', '2026-09-04', 28800, 'current_user')
+            """
+        )
+        conn.commit()
+        repo = WorklogCacheRepository(conn)
+        wl = WorklogEntry(
+            id="new",
+            issue_key="SP-1",
+            work_date=date(2026, 9, 3),
+            seconds=3600,
+            author_is_current_user=True,
+        )
+        repo.replace_window([wl], date(2026, 8, 3), date(2026, 9, 6))
+        rows = {r["id"]: r["seconds"] for r in conn.execute("SELECT id, seconds FROM worklog_cache")}
+        assert rows == {"new": 3600}
+
+    def test_rejects_oversized_window(self, temp_db):
+        repo = WorklogCacheRepository(temp_db.connect())
+        with pytest.raises(ValueError):
+            repo.replace_window([], date(2020, 1, 1), date(2026, 9, 6))
+

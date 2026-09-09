@@ -1,8 +1,9 @@
 import json
+import logging
 from typing import Any, TypeVar
-from pydantic import BaseModel
 
 import httpx
+from pydantic import ValidationError
 
 from lazytrack.ai.base import (
     AIError,
@@ -14,8 +15,13 @@ from lazytrack.ai.base import (
     AIProviderUnavailableError,
 )
 
-T = TypeVar("T", bound=BaseModel)
+logger = logging.getLogger(__name__)
 
+# Available DeepSeek models:
+# - deepseek-chat (latest, recommended)
+# - deepseek-coder (code specialized)
+
+T = TypeVar("T", bound=Any)
 
 class DeepSeekProvider(AIProvider[T]):
     def __init__(self, api_key: str, model: str = "deepseek-chat"):
@@ -59,23 +65,32 @@ class DeepSeekProvider(AIProvider[T]):
                 f"{json.dumps(schema_example, indent=2)}"
             )
             messages[0]["content"] = prompt_with_schema
+            logger.debug(f"[DeepSeek] Using schema: {schema.__name__}")
 
+        logger.debug(f"[DeepSeek] Sending request to {url}")
+        
         try:
             async with httpx.AsyncClient(timeout=60.0) as client:
                 response = await client.post(url, json=payload, headers=headers)
         except httpx.TimeoutException as e:
+            logger.error(f"[DeepSeek] Timeout: {e}")
             raise AITimeoutError(f"Request timed out: {e}")
         except httpx.RequestError as e:
+            logger.error(f"[DeepSeek] Request error: {e}")
             raise AIProviderUnavailableError(f"Provider unavailable: {e}")
 
         if response.status_code == 401:
+            logger.error("[DeepSeek] Authentication failed")
             raise AIAuthenticationError("Invalid DeepSeek API key")
         elif response.status_code == 429:
+            logger.warning("[DeepSeek] Rate limited")
             raise AIRateLimitError("Rate limit exceeded")
         elif response.status_code >= 500:
+            logger.error(f"[DeepSeek] Server error: {response.status_code}")
             raise AIProviderUnavailableError(f"DeepSeek server error: {response.status_code}")
 
         if response.status_code != 200:
+            logger.error(f"[DeepSeek] Unexpected status: {response.status_code}")
             raise AIError(f"Unexpected response: {response.status_code}")
 
         data = response.json()
@@ -83,15 +98,30 @@ class DeepSeekProvider(AIProvider[T]):
         try:
             text = data["choices"][0]["message"]["content"]
         except (KeyError, IndexError) as e:
+            logger.error(f"[DeepSeek] Invalid response structure: {e}, data={data}")
             raise AIInvalidResponseError(f"Invalid response structure: {e}")
+
+        logger.debug(f"[DeepSeek] Raw response: {text[:200]}...")
 
         if schema:
             try:
                 parsed = json.loads(text)
+                logger.debug(f"[DeepSeek] Parsed JSON: {parsed}")
                 return schema.model_validate(parsed)
             except json.JSONDecodeError as e:
-                raise AIInvalidResponseError(f"Invalid JSON response: {e}")
+                logger.error(f"[DeepSeek] JSON decode error: {e}\nRaw: {text[:500]}")
+                raise AIInvalidResponseError(
+                    f"Invalid JSON response: {e}\n"
+                    f"Raw response: {text[:500]}"
+                )
+            except ValidationError as e:
+                logger.error(f"[DeepSeek] Validation error: {e}\nParsed: {parsed}")
+                raise AIInvalidResponseError(
+                    f"Failed to parse structured response: {e}\n"
+                    f"Parsed response: {parsed}"
+                )
             except Exception as e:
+                logger.error(f"[DeepSeek] Unexpected error: {type(e).__name__}: {e}")
                 raise AIInvalidResponseError(f"Failed to parse structured response: {e}")
 
         return text
