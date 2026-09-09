@@ -1,1 +1,52 @@
--e "*.pyc\n__pycache__/\n.venv/\n.env\n*.egg-info/\ndist/\nbuild/"  
+# Secrets and local config
+.env
+.env.*
+!.env.example
+.envrc
+.direnv/
+config.toml
+*.local.toml
+
+# Python / packaging
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*$py.class
+.venv/
+venv/
+*.egg
+*.egg-info/
+.eggs/
+dist/
+build/
+.uv/
+__pypackages__/
+
+# Tests / coverage / linters
+.pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.tox/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+
+# Local data and logs
+*.db
+*.sqlite
+*.sqlite3
+*.log
+
+# Generated, editor, OS, agent tooling
+graphify-out/
+.opencode/
+.cursor/
+.claude/
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+desktop.ini
