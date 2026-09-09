@@ -43,6 +43,7 @@ from lazytrack.ui.chat import (
     bind_pending_from_response,
     chat_history_path,
     confirmation_reply,
+    effective_user_input,
     parse_chat_command,
     parse_status_week,
 )
@@ -891,7 +892,16 @@ def chat(debug: bool = typer.Option(False, "--debug", "-d", help="Enable debug l
                     )
                     state.pending_plan = None
                 else:
-                    effective_input = user_input
+                    today = today_in_timezone(tz_name)
+                    effective_input = effective_user_input(
+                        state, user_input, today=today
+                    )
+                    if (
+                        effective_input == user_input
+                        and state.pending_request
+                        and state.pending_plan is None
+                    ):
+                        state.pending_request = None
 
                 today = today_in_timezone(tz_name)
                 request_tz = timezone_from_text(effective_input, tz_name)

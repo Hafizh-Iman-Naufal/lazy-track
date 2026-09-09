@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, timedelta
+from datetime import date as Date
 from enum import Enum
 from typing import Optional, Union, Annotated, Literal
 
@@ -85,11 +86,10 @@ class ShowIssuesIntent(BaseModel):
     type: Literal["show_issues"] = "show_issues"
 
 
-class AddLeaveIntent(BaseModel):
-    type: Literal["add_leave"] = "add_leave"
-    dates: list[date] = Field(default_factory=list)
-    end_date: Optional[date] = None
-    hours: Optional[float] = Field(default=None, ge=0, le=24)
+class CalendarDateFields(BaseModel):
+    dates: list[Date] = Field(default_factory=list)
+    end_date: Optional[Date] = None
+    date: Optional[Date] = None
 
     @model_validator(mode="before")
     @classmethod
@@ -105,7 +105,7 @@ class AddLeaveIntent(BaseModel):
         return data
 
     @model_validator(mode="after")
-    def resolve_leave_dates(self):
+    def resolve_calendar_dates(self):
         days = list(self.dates)
         if len(days) == 1 and self.end_date is not None:
             start = days[0]
@@ -117,25 +117,28 @@ class AddLeaveIntent(BaseModel):
                 days.append(d)
                 d += timedelta(days=1)
         if not days:
-            raise ValueError("add_leave requires date or dates")
+            raise ValueError("requires date or dates")
         self.dates = days
+        self.date = days[0]
         return self
 
 
-class RemoveLeaveIntent(BaseModel):
+class AddLeaveIntent(CalendarDateFields):
+    type: Literal["add_leave"] = "add_leave"
+    hours: Optional[float] = Field(default=None, ge=0, le=24)
+
+
+class RemoveLeaveIntent(CalendarDateFields):
     type: Literal["remove_leave"] = "remove_leave"
-    date: date
 
 
-class AddHolidayIntent(BaseModel):
+class AddHolidayIntent(CalendarDateFields):
     type: Literal["add_holiday"] = "add_holiday"
-    date: date
     description: Optional[str] = None
 
 
-class RemoveHolidayIntent(BaseModel):
+class RemoveHolidayIntent(CalendarDateFields):
     type: Literal["remove_holiday"] = "remove_holiday"
-    date: date
 
 
 class ClarificationRequired(BaseModel):

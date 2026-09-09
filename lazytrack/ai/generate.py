@@ -41,7 +41,9 @@ async def generate_structured_intent(
         repair = (
             f"{prompt}\n\nYour previous JSON was invalid or incomplete:\n{raw[:800]}\n\n"
             "Fix it to a valid intent JSON. Dates must be YYYY-MM-DD. "
-            "Use the matching type: allocate_time, show_week, add_leave, or clarification_required."
+            "Calendar types may send date or dates. "
+            "Use the matching type: allocate_time, show_week, add_leave, "
+            "remove_leave, add_holiday, remove_holiday, or clarification_required."
         )
         try:
             repaired = await provider.generate(repair)

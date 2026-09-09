@@ -7,9 +7,11 @@ from lazytrack.ai.generate import generate_structured_intent
 from lazytrack.ai.normalize import ParseContext, parse_intent, timezone_from_text
 from lazytrack.ai.prompts import build_intent_prompt
 from lazytrack.ai.schemas import (
+    AddHolidayIntent,
     AddLeaveIntent,
     AllocateTimeIntent,
     ClarificationRequired,
+    RemoveLeaveIntent,
     ShowWeekIntent,
 )
 from lazytrack.cli import _format_response
@@ -156,6 +158,60 @@ class TestParseIntentLoggedGemini:
         assert listed.dates == [date(2026, 8, 3), date(2026, 8, 4), date(2026, 8, 5)]
         assert spanned.dates == listed.dates
 
+    def test_remove_leave_dates_list(self):
+        intent = parse_intent(
+            {"type": "remove_leave", "dates": ["2026-09-10"]},
+            CTX,
+        )
+        assert isinstance(intent, RemoveLeaveIntent)
+        assert intent.date == date(2026, 9, 10)
+        assert intent.dates == [date(2026, 9, 10)]
+
+    def test_remove_leave_range(self):
+        intent = parse_intent(
+            {
+                "type": "remove_leave",
+                "start_date": "2026-08-03",
+                "end_date": "2026-08-05",
+            },
+            CTX,
+        )
+        assert isinstance(intent, RemoveLeaveIntent)
+        assert intent.dates == [date(2026, 8, 3), date(2026, 8, 4), date(2026, 8, 5)]
+
+    def test_remove_leave_from_iso_followup_message(self):
+        ctx = ParseContext(
+            today=CTX.today,
+            timezone=CTX.timezone,
+            hours_per_day=CTX.hours_per_day,
+            issue_keys=CTX.issue_keys,
+            user_message="2026-09-10",
+        )
+        intent = parse_intent({"type": "remove_leave"}, ctx)
+        assert isinstance(intent, RemoveLeaveIntent)
+        assert intent.date == date(2026, 9, 10)
+
+    def test_remove_leave_iso_in_sentence(self):
+        ctx = ParseContext(
+            today=CTX.today,
+            timezone=CTX.timezone,
+            hours_per_day=CTX.hours_per_day,
+            issue_keys=CTX.issue_keys,
+            user_message="at 2026-09-10 this week, can you remove the Leave mark?",
+        )
+        intent = parse_intent({"type": "remove_leave"}, ctx)
+        assert isinstance(intent, RemoveLeaveIntent)
+        assert intent.dates == [date(2026, 9, 10)]
+
+    def test_add_holiday_dates_list(self):
+        intent = parse_intent(
+            {"type": "add_holiday", "dates": ["2026-12-25", "2026-12-26"]},
+            CTX,
+        )
+        assert isinstance(intent, AddHolidayIntent)
+        assert intent.dates == [date(2026, 12, 25), date(2026, 12, 26)]
+        assert intent.date == date(2026, 12, 25)
+
     def test_add_leave_validation_is_not_allocate_copy(self):
         intent = parse_intent({"type": "add_leave"}, CTX)
         assert isinstance(intent, ClarificationRequired)
@@ -178,6 +234,7 @@ class TestParseIntentLoggedGemini:
         assert "Current ISO week: 2026-W36" in prompt
         assert '{"type": "show_week", "week": "2026-W36"}' in prompt
         assert '"dates": ["2026-08-03", "2026-08-04", "2026-08-05"]' in prompt
+        assert '{"type": "remove_leave", "dates": ["2026-09-10"]}' in prompt
 
     def test_multi_issue_remaining_is_resolved_in_order(self):
         intent = parse_intent(

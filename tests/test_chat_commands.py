@@ -14,6 +14,7 @@ from lazytrack.ui.chat import (
     ChatSessionState,
     bind_pending_from_response,
     confirmation_reply,
+    effective_user_input,
     parse_chat_command,
     parse_status_week,
 )
@@ -171,7 +172,7 @@ def test_print_chat_banner_includes_chat_and_version():
     print_chat_banner(console)
     text = console.export_text()
     assert "chat" in text
-    assert "0.1.1-dev" in text
+    assert "0.1.2-dev" in text
 
 
 def test_confirm_apply_to_jira_defaults_false(monkeypatch):
@@ -322,6 +323,33 @@ def test_clarification_does_not_bind_pending_request():
     assert state.pending_plan is None
 
 
+def test_clarification_with_missing_binds_pending():
+    state = ChatSessionState()
+    bind_pending_from_response(
+        state,
+        {
+            "type": "clarification",
+            "message": "Which leave date should I remove?",
+            "missing": ["date"],
+        },
+        "remove the Leave mark",
+    )
+    assert state.pending_request == "remove the Leave mark"
+
+
+def test_iso_followup_merges_pending_request():
+    state = ChatSessionState(pending_request="remove the Leave mark")
+    merged = effective_user_input(state, "2026-09-10", today=date(2026, 9, 9))
+    assert merged.endswith("Clarification: 2026-09-10")
+    assert effective_user_input(state, "'2026-09-10'", today=date(2026, 9, 9)).endswith(
+        "Clarification: '2026-09-10'"
+    )
+    assert (
+        effective_user_input(state, "show my week", today=date(2026, 9, 9))
+        == "show my week"
+    )
+
+
 def test_plan_preview_still_binds_pending():
     state = ChatSessionState()
     bind_pending_from_response(
@@ -365,6 +393,31 @@ def test_multi_day_leave_persists(tmp_path):
         date(2026, 8, 5),
     }
     db.close()
+
+
+def test_remove_leave_range_clears_calendar():
+    from lazytrack.ai.schemas import AddLeaveIntent, RemoveLeaveIntent
+
+    config = LazyTrackConfig()
+    calendar = WorkCalendar(config=config.work)
+    planner = Planner(
+        PlannerContext(
+            calendar=calendar,
+            assigned_issues=[],
+            user_worklogs=[],
+            managed_worklogs=[],
+        ),
+        config,
+    )
+    orch = ChatOrchestrator(config, calendar, [], [], planner)
+    orch.handle_intent(
+        AddLeaveIntent(dates=[date(2026, 8, 3), date(2026, 8, 4), date(2026, 8, 5)])
+    )
+    result = orch.handle_intent(
+        RemoveLeaveIntent(date=date(2026, 8, 3), end_date=date(2026, 8, 5))
+    )
+    assert "2026-08-03, 2026-08-04, 2026-08-05" in result["message"]
+    assert calendar.leaves == {}
 
 
 def test_two_weeks_render_two_titles():

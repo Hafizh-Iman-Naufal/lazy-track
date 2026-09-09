@@ -95,6 +95,14 @@ class TestAddLeaveIntent:
     def test_add_leave_range(self):
         intent = AddLeaveIntent(date=date(2026, 8, 3), end_date=date(2026, 8, 5))
         assert intent.dates == [date(2026, 8, 3), date(2026, 8, 4), date(2026, 8, 5)]
+        assert intent.date == date(2026, 8, 3)
+
+
+class TestRemoveLeaveIntent:
+    def test_remove_leave_from_dates(self):
+        intent = RemoveLeaveIntent(dates=[date(2026, 9, 10)])
+        assert intent.date == date(2026, 9, 10)
+        assert intent.dates == [date(2026, 9, 10)]
 
 
 class TestClarificationRequired:

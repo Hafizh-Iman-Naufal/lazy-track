@@ -237,6 +237,91 @@ def _inclusive_dates(start: date, end: date) -> list[date]:
     return days
 
 
+_CALENDAR_TYPES = {
+    "add_leave",
+    "addleaveintent",
+    "remove_leave",
+    "removeleveintent",
+    "add_holiday",
+    "addholidayintent",
+    "remove_holiday",
+    "removeholidayintent",
+}
+
+
+def parse_followup_date(text: str, today: date) -> Optional[date]:
+    stripped = text.strip().strip("'\"")
+    stripped = re.sub(r"^date\s*=\s*", "", stripped, flags=re.I).strip().strip("'\"")
+    if not stripped:
+        return None
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", stripped):
+        try:
+            return date.fromisoformat(stripped)
+        except ValueError:
+            return None
+    lowered = stripped.lower()
+    weekday = "|".join(WEEKDAYS)
+    if (
+        lowered in ("today", "now", "tomorrow", "yesterday")
+        or lowered in WEEKDAYS
+        or re.fullmatch(rf"(last|next|this)\s+({weekday})", lowered)
+        or re.fullmatch(rf"({weekday})\s+(this|last|next)\s+week", lowered)
+    ):
+        return _parse_date_value(stripped, today)
+    return None
+
+
+def _dates_from_user_message(ctx: ParseContext) -> list[date]:
+    if not ctx.user_message:
+        return []
+    lines = [line.strip() for line in ctx.user_message.splitlines() if line.strip()]
+    candidates: list[str] = []
+    if lines:
+        last = lines[-1]
+        if last.lower().startswith("clarification:"):
+            last = last.split(":", 1)[1].strip()
+        candidates.append(last.strip("'\""))
+    candidates.append(ctx.user_message.strip().strip("'\""))
+    for candidate in candidates:
+        parsed = parse_followup_date(candidate, ctx.today)
+        if parsed:
+            return [parsed]
+    found = re.findall(r"\d{4}-\d{2}-\d{2}", ctx.user_message)
+    days: list[date] = []
+    for item in found:
+        try:
+            parsed = date.fromisoformat(item)
+        except ValueError:
+            continue
+        if parsed not in days:
+            days.append(parsed)
+    return days
+
+
+def _calendar_dates(
+    out: dict[str, Any],
+    start: Optional[date],
+    end: Optional[date],
+    ctx: ParseContext,
+) -> None:
+    parsed_dates: list[date] = []
+    raw_dates = out.get("dates")
+    if isinstance(raw_dates, list):
+        for item in raw_dates:
+            parsed = _parse_date_value(item, ctx.today)
+            if parsed:
+                parsed_dates.append(parsed)
+    if not parsed_dates and start:
+        parsed_dates = _inclusive_dates(start, end or start)
+    if not parsed_dates:
+        parsed_dates = _dates_from_user_message(ctx)
+    if parsed_dates:
+        out["dates"] = [d.isoformat() for d in parsed_dates]
+        out["date"] = parsed_dates[0].isoformat()
+        if start and end and end != start and len(parsed_dates) > 1:
+            out["end_date"] = parsed_dates[-1].isoformat()
+
+
 def _gaps_from_text(text: str) -> list[dict[str, str]]:
     match = re.search(r"(\d{1,2}):(\d{2})\s*[-–]\s*(\d{1,2}):(\d{2})", text)
     if not match:
@@ -357,24 +442,8 @@ def normalize_intent_dict(data: dict[str, Any], ctx: ParseContext) -> dict[str, 
     if gaps:
         out["gaps"] = gaps
 
-    if intent_type in ("add_leave", "addleaveintent"):
-        parsed_dates: list[date] = []
-        raw_dates = out.get("dates")
-        if isinstance(raw_dates, list):
-            for item in raw_dates:
-                parsed = _parse_date_value(item, ctx.today)
-                if parsed:
-                    parsed_dates.append(parsed)
-        if parsed_dates:
-            out["dates"] = [d.isoformat() for d in parsed_dates]
-            out["date"] = parsed_dates[0].isoformat()
-        elif start:
-            last = end or start
-            days = _inclusive_dates(start, last)
-            out["dates"] = [d.isoformat() for d in days]
-            out["date"] = start.isoformat()
-            if last != start:
-                out["end_date"] = last.isoformat()
+    if intent_type in _CALENDAR_TYPES:
+        _calendar_dates(out, start, end, ctx)
 
     if intent_type in ("show_week", "showweekintent"):
         weeks: list[str] = []

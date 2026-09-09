@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "lazytrack"
-version = "0.1.1-dev"
+version = "0.1.2-dev"
 description = "AI-assisted Jira worklog management CLI"
 readme = "README.md"
 requires-python = ">=3.11"

@@ -4,6 +4,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Optional
 
+from lazytrack.ai.normalize import parse_followup_date
 from lazytrack.ai.schemas import (
     AllocationItem,
     AddHolidayIntent,
@@ -109,8 +110,25 @@ def bind_pending_from_response(
         state.pending_request = effective_input
         state.pending_plan = response["plan"]
         return
+    if response.get("type") == "clarification" and response.get("missing"):
+        state.pending_request = effective_input
+        return
     if state.pending_plan is None:
         state.pending_request = None
+
+
+def merge_date_followup(pending: str, user_input: str) -> str:
+    return f"{pending}\nClarification: {user_input}"
+
+
+def effective_user_input(
+    state: ChatSessionState, user_input: str, *, today: date
+) -> str:
+    if state.pending_plan is not None:
+        return user_input
+    if state.pending_request and parse_followup_date(user_input, today):
+        return merge_date_followup(state.pending_request, user_input)
+    return user_input
 
 
 def confirmation_reply(text: str) -> Optional[bool]:
@@ -361,41 +379,56 @@ class ChatOrchestrator:
         }
 
     def _handle_remove_leave(self, intent: RemoveLeaveIntent) -> dict:
-        removed = self.calendar.remove_leave(intent.date)
-        if self.calendar_repo:
-            removed = self.calendar_repo.remove_leave(intent.date) or removed
-        if removed:
+        days = list(intent.dates)
+        removed_days = []
+        for work_date in days:
+            removed = self.calendar.remove_leave(work_date)
+            if self.calendar_repo:
+                removed = self.calendar_repo.remove_leave(work_date) or removed
+            if removed:
+                removed_days.append(work_date)
+        listed = ", ".join(d.isoformat() for d in (removed_days or days))
+        if removed_days:
             return {
                 "type": "success",
-                "message": f"Leave removed for {intent.date}",
+                "message": f"Leave removed for {listed}",
             }
         return {
             "type": "info",
-            "message": f"No leave entry found for {intent.date}",
+            "message": f"No leave entry found for {listed}",
         }
 
     def _handle_add_holiday(self, intent: AddHolidayIntent) -> dict:
-        holiday = HolidayEntry(date=intent.date, description=intent.description)
-        self.calendar.add_holiday(holiday)
-        if self.calendar_repo:
-            self.calendar_repo.add_holiday(holiday)
+        days = list(intent.dates)
+        for work_date in days:
+            holiday = HolidayEntry(date=work_date, description=intent.description)
+            self.calendar.add_holiday(holiday)
+            if self.calendar_repo:
+                self.calendar_repo.add_holiday(holiday)
+        listed = ", ".join(d.isoformat() for d in days)
         desc = f" ({intent.description})" if intent.description else ""
         return {
             "type": "success",
-            "message": f"Holiday added for {intent.date}{desc}",
+            "message": f"Holiday added for {listed}{desc}",
         }
 
     def _handle_remove_holiday(self, intent: RemoveHolidayIntent) -> dict:
-        removed = self.calendar.remove_holiday(intent.date)
-        if self.calendar_repo:
-            removed = self.calendar_repo.remove_holiday(intent.date) or removed
-        if removed:
+        days = list(intent.dates)
+        removed_days = []
+        for work_date in days:
+            removed = self.calendar.remove_holiday(work_date)
+            if self.calendar_repo:
+                removed = self.calendar_repo.remove_holiday(work_date) or removed
+            if removed:
+                removed_days.append(work_date)
+        listed = ", ".join(d.isoformat() for d in (removed_days or days))
+        if removed_days:
             return {
                 "type": "success",
-                "message": f"Holiday removed for {intent.date}",
+                "message": f"Holiday removed for {listed}",
             }
         return {
             "type": "info",
-            "message": f"No holiday entry found for {intent.date}",
+            "message": f"No holiday entry found for {listed}",
         }
 
