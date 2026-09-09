@@ -20,6 +20,9 @@ from lazytrack.ai.prompts import build_intent_prompt
 from lazytrack.ai.providers.gemini import GeminiProvider
 from lazytrack.ai.providers.deepseek import DeepSeekProvider
 from lazytrack.ai.providers.minimax import MiniMaxProvider
+from lazytrack.ai.providers.openai import OpenAIProvider
+from lazytrack.ai.providers.claude import ClaudeProvider
+from lazytrack.ai.providers.opencode import OpenCodeProvider
 from lazytrack.config import load_config, redact_secrets
 from lazytrack.domain import LeaveEntry, HolidayEntry
 from lazytrack.domain.calendar import create_calendar
@@ -673,6 +676,15 @@ def _create_ai_provider(config):
     elif provider_name == "minimax":
         api_key = config.ai.providers.minimax.api_key
         return MiniMaxProvider(api_key, model=config.ai.model or "MiniMax-M2.7")
+    elif provider_name == "openai":
+        api_key = config.ai.providers.openai.api_key
+        return OpenAIProvider(api_key, model=config.ai.model or "gpt-4o-mini")
+    elif provider_name == "claude":
+        api_key = config.ai.providers.claude.api_key
+        return ClaudeProvider(api_key, model=config.ai.model or "claude-haiku-4-5")
+    elif provider_name == "opencode":
+        api_key = config.ai.providers.opencode.api_key
+        return OpenCodeProvider(api_key, model=config.ai.model or "minimax-m2.7")
     else:
         raise typer.Exit(f"Unknown AI provider: {provider_name}")
 

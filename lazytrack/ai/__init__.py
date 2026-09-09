@@ -14,7 +14,14 @@ from lazytrack.ai.registry import (
     list_providers,
     get_registry,
 )
-from lazytrack.ai.providers import GeminiProvider, DeepSeekProvider, MiniMaxProvider
+from lazytrack.ai.providers import (
+    GeminiProvider,
+    DeepSeekProvider,
+    MiniMaxProvider,
+    OpenAIProvider,
+    ClaudeProvider,
+    OpenCodeProvider,
+)
 from lazytrack.ai.schemas import (
     IntentType,
     AllocationItem,
@@ -39,6 +46,9 @@ registry = get_registry()
 registry.register("gemini", GeminiProvider)
 registry.register("deepseek", DeepSeekProvider)
 registry.register("minimax", MiniMaxProvider)
+registry.register("openai", OpenAIProvider)
+registry.register("claude", ClaudeProvider)
+registry.register("opencode", OpenCodeProvider)
 
 __all__ = [
     "AIError",
@@ -56,6 +66,9 @@ __all__ = [
     "GeminiProvider",
     "DeepSeekProvider",
     "MiniMaxProvider",
+    "OpenAIProvider",
+    "ClaudeProvider",
+    "OpenCodeProvider",
     "IntentType",
     "AllocationItem",
     "AllocateTimeIntent",

@@ -119,6 +119,24 @@ class TestLoadConfig:
         config = load_config(config_path=None, env_file_path=None)
         assert config.work.hours_per_day == 8.0
 
+    def test_new_provider_keys_from_env(self, tmp_path):
+        env = tmp_path / ".env"
+        env.write_text(
+            "OPENAI_API_KEY=sk-test\n"
+            "ANTHROPIC_API_KEY=ant-test\n"
+            "OPENCODE_API_KEY=oc-test\n"
+        )
+        config = load_config(config_path=tmp_path / "missing.toml", env_file_path=env)
+        assert config.ai.providers.openai.api_key == "sk-test"
+        assert config.ai.providers.claude.api_key == "ant-test"
+        assert config.ai.providers.opencode.api_key == "oc-test"
+
+    def test_claude_key_preferred_over_anthropic(self, tmp_path):
+        env = tmp_path / ".env"
+        env.write_text("CLAUDE_API_KEY=claude-first\nANTHROPIC_API_KEY=anthropic-second\n")
+        config = load_config(config_path=tmp_path / "missing.toml", env_file_path=env)
+        assert config.ai.providers.claude.api_key == "claude-first"
+
 
 class TestRedactSecrets:
     def test_api_token_redacted(self):
@@ -137,8 +155,14 @@ class TestRedactSecrets:
         config.ai.providers.gemini.api_key = "gemini_key"
         config.ai.providers.deepseek.api_key = "deepseek_key"
         config.ai.providers.minimax.api_key = "minimax_key"
+        config.ai.providers.openai.api_key = "openai_key"
+        config.ai.providers.claude.api_key = "claude_key"
+        config.ai.providers.opencode.api_key = "opencode_key"
         
         data = redact_secrets(config)
         assert data["ai"]["providers"]["gemini"]["api_key"] == "[REDACTED]"
         assert data["ai"]["providers"]["deepseek"]["api_key"] == "[REDACTED]"
         assert data["ai"]["providers"]["minimax"]["api_key"] == "[REDACTED]"
+        assert data["ai"]["providers"]["openai"]["api_key"] == "[REDACTED]"
+        assert data["ai"]["providers"]["claude"]["api_key"] == "[REDACTED]"
+        assert data["ai"]["providers"]["opencode"]["api_key"] == "[REDACTED]"

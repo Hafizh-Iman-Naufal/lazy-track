@@ -24,6 +24,15 @@ enabled = true
 [ai.providers.minimax]
 enabled = true
 
+[ai.providers.openai]
+enabled = true
+
+[ai.providers.claude]
+enabled = true
+
+[ai.providers.opencode]
+enabled = true
+
 [safety]
 require_confirmation = true
 allow_issue_mutations = false

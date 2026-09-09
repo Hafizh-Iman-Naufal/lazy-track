@@ -74,8 +74,10 @@ class TestSecretsNotLeaked:
         
         config = LazyTrackConfig()
         config.ai.providers.gemini.api_key = "key123"
+        config.ai.providers.openai.api_key = "openai_key"
         data = redact_secrets(config)
         assert data["ai"]["providers"]["gemini"]["api_key"] == "[REDACTED]"
+        assert data["ai"]["providers"]["openai"]["api_key"] == "[REDACTED]"
 
 
 class TestConfirmationRequired:

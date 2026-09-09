@@ -10,7 +10,14 @@ from lazytrack.ai import (
     AIProviderUnavailableError,
     get_registry,
 )
-from lazytrack.ai.providers import GeminiProvider, DeepSeekProvider, MiniMaxProvider
+from lazytrack.ai.providers import (
+    GeminiProvider,
+    DeepSeekProvider,
+    MiniMaxProvider,
+    OpenAIProvider,
+    ClaudeProvider,
+    OpenCodeProvider,
+)
 
 
 class IntentSchema(BaseModel):
@@ -25,12 +32,18 @@ class TestProviderRegistry:
         registry.register("gemini", GeminiProvider)
         registry.register("deepseek", DeepSeekProvider)
         registry.register("minimax", MiniMaxProvider)
+        registry.register("openai", OpenAIProvider)
+        registry.register("claude", ClaudeProvider)
+        registry.register("opencode", OpenCodeProvider)
 
     def test_list_providers(self):
         providers = list_providers()
         assert "gemini" in providers
         assert "deepseek" in providers
         assert "minimax" in providers
+        assert "openai" in providers
+        assert "claude" in providers
+        assert "opencode" in providers
 
     def test_get_gemini_provider(self):
         cls = get_provider("gemini")
@@ -44,10 +57,25 @@ class TestProviderRegistry:
         cls = get_provider("minimax")
         assert cls == MiniMaxProvider
 
+    def test_get_openai_provider(self):
+        cls = get_provider("openai")
+        assert cls == OpenAIProvider
+
+    def test_get_claude_provider(self):
+        cls = get_provider("claude")
+        assert cls == ClaudeProvider
+
+    def test_get_opencode_provider(self):
+        cls = get_provider("opencode")
+        assert cls == OpenCodeProvider
+
     def test_case_insensitive(self):
         assert get_provider("GEMINI") == GeminiProvider
         assert get_provider("DeepSeek") == DeepSeekProvider
         assert get_provider("MiniMax") == MiniMaxProvider
+        assert get_provider("OpenAI") == OpenAIProvider
+        assert get_provider("Claude") == ClaudeProvider
+        assert get_provider("OpenCode") == OpenCodeProvider
 
     def test_unknown_provider(self):
         assert get_provider("unknown") is None
@@ -96,6 +124,54 @@ class TestMiniMaxProvider:
 
     def test_no_api_key_raises(self):
         provider = MiniMaxProvider(api_key="")
+        import asyncio
+        with pytest.raises(AIAuthenticationError):
+            asyncio.run(provider.generate("test"))
+
+
+class TestOpenAIProvider:
+    def test_name(self):
+        provider = OpenAIProvider(api_key="test")
+        assert provider.name() == "openai"
+
+    def test_supports_structured_output(self):
+        provider = OpenAIProvider(api_key="test")
+        assert provider.supports_structured_output() is True
+
+    def test_no_api_key_raises(self):
+        provider = OpenAIProvider(api_key="")
+        import asyncio
+        with pytest.raises(AIAuthenticationError):
+            asyncio.run(provider.generate("test"))
+
+
+class TestClaudeProvider:
+    def test_name(self):
+        provider = ClaudeProvider(api_key="test")
+        assert provider.name() == "claude"
+
+    def test_supports_structured_output(self):
+        provider = ClaudeProvider(api_key="test")
+        assert provider.supports_structured_output() is True
+
+    def test_no_api_key_raises(self):
+        provider = ClaudeProvider(api_key="")
+        import asyncio
+        with pytest.raises(AIAuthenticationError):
+            asyncio.run(provider.generate("test"))
+
+
+class TestOpenCodeProvider:
+    def test_name(self):
+        provider = OpenCodeProvider(api_key="test")
+        assert provider.name() == "opencode"
+
+    def test_supports_structured_output(self):
+        provider = OpenCodeProvider(api_key="test")
+        assert provider.supports_structured_output() is True
+
+    def test_no_api_key_raises(self):
+        provider = OpenCodeProvider(api_key="")
         import asyncio
         with pytest.raises(AIAuthenticationError):
             asyncio.run(provider.generate("test"))

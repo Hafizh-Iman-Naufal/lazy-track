@@ -8,7 +8,7 @@ The model never calls Jira itself.
 
 - Python 3.11+
 - A Jira Cloud site and [API token](https://id.atlassian.com/manage-profile/security/api-tokens)
-- For `lazytrack chat`, an API key for Gemini, DeepSeek, or MiniMax
+- For `lazytrack chat`, an API key for Gemini, DeepSeek, MiniMax, OpenAI, Claude, or OpenCode
 
 `tzdata` is a declared dependency so IANA names such as `UTC` and `America/New_York` resolve on Windows.
 
@@ -47,6 +47,10 @@ JIRA_PROJECT_KEY=ABC  # optional
 GEMINI_API_KEY=
 DEEPSEEK_API_KEY=
 MINIMAX_API_KEY=
+OPENAI_API_KEY=
+CLAUDE_API_KEY=
+# CLAUDE_API_KEY is preferred; ANTHROPIC_API_KEY is used if CLAUDE_API_KEY is empty
+OPENCODE_API_KEY=
 ```
 
 Edit `config.toml`. Important `[work]` and `[jira]` keys (see `config.example.toml` for the full template):
@@ -70,6 +74,8 @@ provider = "gemini"
 [safety]
 require_confirmation = true
 ```
+
+Set `[ai] provider` to `gemini`, `deepseek`, `minimax`, `openai`, `claude`, or `opencode`. Optional `model` overrides that provider's default.
 
 - `timezone` is the clock you plan in (relative words like `today` and weekday names use this zone).
 - `day_start` is when the first worklog of a day begins (`HH:MM`, default `10:00`).

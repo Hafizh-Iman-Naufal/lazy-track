@@ -68,6 +68,9 @@ class AIProvidersConfig(BaseModel):
     gemini: AIProviderConfig = Field(default_factory=AIProviderConfig)
     deepseek: AIProviderConfig = Field(default_factory=AIProviderConfig)
     minimax: AIProviderConfig = Field(default_factory=AIProviderConfig)
+    openai: AIProviderConfig = Field(default_factory=AIProviderConfig)
+    claude: AIProviderConfig = Field(default_factory=AIProviderConfig)
+    opencode: AIProviderConfig = Field(default_factory=AIProviderConfig)
 
 
 class AIConfig(BaseModel):
@@ -148,6 +151,14 @@ def load_config(
         config.ai.providers.deepseek.api_key = settings_data["DEEPSEEK_API_KEY"]
     if settings_data.get("MINIMAX_API_KEY"):
         config.ai.providers.minimax.api_key = settings_data["MINIMAX_API_KEY"]
+    if settings_data.get("OPENAI_API_KEY"):
+        config.ai.providers.openai.api_key = settings_data["OPENAI_API_KEY"]
+    if settings_data.get("CLAUDE_API_KEY"):
+        config.ai.providers.claude.api_key = settings_data["CLAUDE_API_KEY"]
+    elif settings_data.get("ANTHROPIC_API_KEY"):
+        config.ai.providers.claude.api_key = settings_data["ANTHROPIC_API_KEY"]
+    if settings_data.get("OPENCODE_API_KEY"):
+        config.ai.providers.opencode.api_key = settings_data["OPENCODE_API_KEY"]
 
     return config
 
@@ -159,7 +170,7 @@ def redact_secrets(config: LazyTrackConfig) -> dict:
     data["jira"]["email"] = "[REDACTED]" if config.jira.email else None
 
     providers = data.get("ai", {}).get("providers", {})
-    for provider in ["gemini", "deepseek", "minimax"]:
+    for provider in ["gemini", "deepseek", "minimax", "openai", "claude", "opencode"]:
         if provider in providers:
             api_key = getattr(config.ai.providers, provider).api_key
             providers[provider]["api_key"] = "[REDACTED]" if api_key else None
