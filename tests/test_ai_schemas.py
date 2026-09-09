@@ -76,6 +76,7 @@ class TestAddLeaveIntent:
         intent = AddLeaveIntent(date=date(2026, 9, 10))
         assert intent.type == "add_leave"
         assert intent.hours is None
+        assert intent.dates == [date(2026, 9, 10)]
 
     def test_add_leave_partial(self):
         intent = AddLeaveIntent(date=date(2026, 9, 10), hours=4.0)
@@ -84,6 +85,16 @@ class TestAddLeaveIntent:
     def test_add_leave_invalid_hours(self):
         with pytest.raises(ValidationError):
             AddLeaveIntent(date=date(2026, 9, 10), hours=25)
+
+    def test_add_leave_date_list(self):
+        intent = AddLeaveIntent(
+            dates=[date(2026, 8, 3), date(2026, 8, 4), date(2026, 8, 5)]
+        )
+        assert intent.dates == [date(2026, 8, 3), date(2026, 8, 4), date(2026, 8, 5)]
+
+    def test_add_leave_range(self):
+        intent = AddLeaveIntent(date=date(2026, 8, 3), end_date=date(2026, 8, 5))
+        assert intent.dates == [date(2026, 8, 3), date(2026, 8, 4), date(2026, 8, 5)]
 
 
 class TestClarificationRequired:

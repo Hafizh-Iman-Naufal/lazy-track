@@ -128,9 +128,9 @@ lazytrack chat --debug
 lazytrack chat --help
 ```
 
-Natural language covers assigned issues, this week’s hours, allocating time, leave, and holidays. Worklog requests always show an exact **preview** first. Reply `yes` to apply it, `no` to cancel it, or describe a correction to receive a revised preview. Chat never writes a previewed plan without that explicit next-turn confirmation.
+Natural language covers assigned issues, this week’s hours, allocating time, leave, and holidays. Worklog requests always show an exact **preview** first. Reply `yes` to apply it, `no` to cancel it, or describe a correction to receive a revised preview. Chat never writes a previewed plan without that explicit next-turn confirmation. Leave and holidays apply immediately and are saved locally (several dates or a range in one leave request is fine). Chat cannot run `lazytrack sync`; do that in another terminal, then restart chat so `/status` reloads the cache.
 
-Weekly status uses ISO week IDs and the same Monday–Sunday table in CLI and chat. For example, `lazytrack status --week 2026-W36`, `/status 2026-W36`, and “show my status for 2026-W36” all display `Week 2026-W36: 2026-08-31 - 2026-09-06`.
+Weekly status uses ISO week IDs and the same Monday–Sunday table in CLI and chat, including a Note column (`Leave`, `Holiday`, `Weekend`). For example, `lazytrack status --week 2026-W36`, `/status 2026-W36`, and “show my status for 2026-W36” all display `Week 2026-W36: 2026-08-31 - 2026-09-06`. Two ranges in one question can render two week tables.
 
 If `issues_cache` is empty, chat warns you to run `lazytrack sync` and still lets you use `/status` and calendar commands. Up/down recalls previous chat lines; they are saved in `~/.lazytrack/chat_history`.
 

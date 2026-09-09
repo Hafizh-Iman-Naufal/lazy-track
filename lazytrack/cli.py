@@ -9,7 +9,7 @@ import typer
 from InquirerPy import inquirer
 from prompt_toolkit import PromptSession
 from prompt_toolkit.history import FileHistory
-from rich.console import Console
+from rich.console import Console, Group
 from rich.table import Table
 
 from lazytrack import __version__
@@ -40,6 +40,7 @@ from lazytrack.ui.chat import (
     CHAT_HELP,
     ChatSessionState,
     ChatOrchestrator,
+    bind_pending_from_response,
     chat_history_path,
     confirmation_reply,
     parse_chat_command,
@@ -699,7 +700,10 @@ def _format_response(response: dict, orchestrator: ChatOrchestrator) -> object:
     elif rtype == "info":
         return f"[yellow]{msg}[/yellow]"
     elif rtype == "clarification":
-        return f"[yellow]{msg}[/yellow]\nMissing: {', '.join(response.get('missing', []))}"
+        missing = [item for item in (response.get("missing") or []) if item]
+        if missing:
+            return f"[yellow]{msg}[/yellow]\nMissing: {', '.join(missing)}"
+        return f"[yellow]{msg}[/yellow]"
     elif rtype == "plan_preview":
         preview = response.get("preview", "")
         if isinstance(preview, str):
@@ -709,11 +713,15 @@ def _format_response(response: dict, orchestrator: ChatOrchestrator) -> object:
             lines.append(f"  - {op.get('date')} {op.get('issue_key')}: {op.get('hours')}h")
         return "\n".join(lines)
     elif rtype == "week_status":
-        return week_status_renderable(
-            response["week_start"],
-            orchestrator.calendar,
-            response["logged_by_date"],
-        )
+        starts = response.get("week_starts") or [response["week_start"]]
+        logged_weeks = response.get("logged_by_weeks") or [response["logged_by_date"]]
+        tables = [
+            week_status_renderable(start, orchestrator.calendar, logged)
+            for start, logged in zip(starts, logged_weeks)
+        ]
+        if len(tables) == 1:
+            return tables[0]
+        return Group(*tables)
     elif rtype == "issues_list":
         issues = response.get("issues", [])
         if not issues:
@@ -787,8 +795,6 @@ def chat(debug: bool = typer.Option(False, "--debug", "-d", help="Enable debug l
     for entry in overtime:
         calendar.add_overtime(entry)
 
-    db.close()
-
     from lazytrack.domain import Planner, PlannerContext
     planner = Planner(PlannerContext(
         calendar=calendar,
@@ -797,7 +803,9 @@ def chat(debug: bool = typer.Option(False, "--debug", "-d", help="Enable debug l
         managed_worklogs=[],
     ), config)
 
-    orchestrator = ChatOrchestrator(config, calendar, issues, worklogs, planner)
+    orchestrator = ChatOrchestrator(
+        config, calendar, issues, worklogs, planner, calendar_repo=calendar_repo
+    )
 
     print_chat_banner(console)
     console.print("[dim]Ask about issues, worklogs, allocating time, leave, and holidays[/dim]")
@@ -815,147 +823,139 @@ def chat(debug: bool = typer.Option(False, "--debug", "-d", help="Enable debug l
     history: list[tuple[str, str]] = []
     state = ChatSessionState()
     tz_name = config.work.timezone
-    today = today_in_timezone(tz_name)
     issue_keys = [i.key for i in issues]
     session = PromptSession(history=FileHistory(str(chat_history_path())))
 
-    while True:
-        try:
-            user_input = session.prompt("> ")
-        except (KeyboardInterrupt, EOFError):
-            console.print("\n[dim]Goodbye![/dim]")
-            break
+    try:
+        while True:
+            try:
+                user_input = session.prompt("> ")
+            except (KeyboardInterrupt, EOFError):
+                console.print("\n[dim]Goodbye![/dim]")
+                break
 
-        user_input = user_input.strip()
-        if not user_input:
-            continue
-
-        local = parse_chat_command(user_input)
-        if local == "exit":
-            console.print("[dim]Goodbye![/dim]")
-            break
-        if local == "help":
-            console.print(CHAT_HELP)
-            continue
-        if local == "clear":
-            history = []
-            state.clear()
-            console.print("[dim]History cleared.[/dim]")
-            continue
-
-        try:
-            if local == "status":
-                try:
-                    selected_week = parse_status_week(user_input)
-                except ValueError as exc:
-                    console.print(f"[red]{exc}[/red]")
-                    continue
-                output = _format_response(
-                    orchestrator.handle_intent(ShowWeekIntent(week=selected_week)),
-                    orchestrator,
-                )
-                console.print(output)
-                continue
-            if local == "issues":
-                output = _format_response(
-                    orchestrator.handle_intent(ShowIssuesIntent()),
-                    orchestrator,
-                )
-                console.print(output)
+            user_input = user_input.strip()
+            if not user_input:
                 continue
 
-            if state.pending_plan is not None:
-                decision = confirmation_reply(user_input)
-                if decision is True:
-                    plan = state.pending_plan
-                    apply_out = _apply_chat_plan(plan, config)
-                    console.print(apply_out)
-                    if str(apply_out).startswith("[green]"):
-                        orchestrator.record_applied_plan(plan)
-                    state.clear()
+            local = parse_chat_command(user_input)
+            if local == "exit":
+                console.print("[dim]Goodbye![/dim]")
+                break
+            if local == "help":
+                console.print(CHAT_HELP)
+                continue
+            if local == "clear":
+                history = []
+                state.clear()
+                console.print("[dim]History cleared.[/dim]")
+                continue
+
+            try:
+                if local == "status":
+                    try:
+                        selected_week = parse_status_week(user_input)
+                    except ValueError as exc:
+                        console.print(f"[red]{exc}[/red]")
+                        continue
+                    output = _format_response(
+                        orchestrator.handle_intent(ShowWeekIntent(week=selected_week)),
+                        orchestrator,
+                    )
+                    console.print(output)
                     continue
-                if decision is False:
-                    state.clear()
-                    console.print("[dim]Plan cancelled. Nothing was written to Jira.[/dim]")
+                if local == "issues":
+                    output = _format_response(
+                        orchestrator.handle_intent(ShowIssuesIntent()),
+                        orchestrator,
+                    )
+                    console.print(output)
                     continue
-                effective_input = (
-                    f"{state.pending_request or ''}\nCorrection: {user_input}".strip()
+
+                if state.pending_plan is not None:
+                    decision = confirmation_reply(user_input)
+                    if decision is True:
+                        plan = state.pending_plan
+                        apply_out = _apply_chat_plan(plan, config)
+                        console.print(apply_out)
+                        if str(apply_out).startswith("[green]"):
+                            orchestrator.record_applied_plan(plan)
+                        state.clear()
+                        continue
+                    if decision is False:
+                        state.clear()
+                        console.print("[dim]Plan cancelled. Nothing was written to Jira.[/dim]")
+                        continue
+                    effective_input = (
+                        f"{state.pending_request or ''}\nCorrection: {user_input}".strip()
+                    )
+                    state.pending_plan = None
+                else:
+                    effective_input = user_input
+
+                today = today_in_timezone(tz_name)
+                request_tz = timezone_from_text(effective_input, tz_name)
+                w_start, _ = cache_window(today, config.safety.worklog_lookback_weeks)
+                w_end = today + timedelta(days=config.safety.max_plan_span_days)
+                prompt = build_intent_prompt(
+                    effective_input,
+                    today=today,
+                    timezone=request_tz,
+                    hours_per_day=config.work.hours_per_day,
+                    issue_keys=issue_keys,
+                    history=history,
+                    window_start=w_start,
+                    window_end=w_end,
+                    max_plan_span_days=config.safety.max_plan_span_days,
                 )
-                state.pending_plan = None
-            elif state.pending_request:
-                effective_input = (
-                    f"{state.pending_request}\nClarification: {user_input}"
+                ctx = ParseContext(
+                    today=today,
+                    timezone=request_tz,
+                    hours_per_day=config.work.hours_per_day,
+                    issue_keys=issue_keys,
+                    user_message=effective_input,
+                    window_start=w_start,
+                    window_end=w_end,
                 )
-            else:
-                effective_input = user_input
 
-            today = today_in_timezone(tz_name)
-            request_tz = timezone_from_text(effective_input, tz_name)
-            w_start, _ = cache_window(today, config.safety.worklog_lookback_weeks)
-            w_end = today + timedelta(days=config.safety.max_plan_span_days)
-            prompt = build_intent_prompt(
-                effective_input,
-                today=today,
-                timezone=request_tz,
-                hours_per_day=config.work.hours_per_day,
-                issue_keys=issue_keys,
-                history=history,
-                window_start=w_start,
-                window_end=w_end,
-                max_plan_span_days=config.safety.max_plan_span_days,
-            )
-            ctx = ParseContext(
-                today=today,
-                timezone=request_tz,
-                hours_per_day=config.work.hours_per_day,
-                issue_keys=issue_keys,
-                user_message=effective_input,
-                window_start=w_start,
-                window_end=w_end,
-            )
+                intent = asyncio.run(generate_structured_intent(ai_provider, prompt, ctx))
+                response = orchestrator.handle_intent(intent, timezone=request_tz)
+                output = _format_response(response, orchestrator)
+                console.print(output)
+                history.append(("user", user_input))
+                if isinstance(output, str):
+                    history_text = output[:500]
+                else:
+                    n = len(response.get("issues") or [])
+                    history_text = f"{n} issues" if n else "Assigned Issues"
+                history.append(("assistant", history_text))
+                history = history[-8:]
 
-            intent = asyncio.run(generate_structured_intent(ai_provider, prompt, ctx))
-            response = orchestrator.handle_intent(intent, timezone=request_tz)
-            output = _format_response(response, orchestrator)
-            console.print(output)
-            history.append(("user", user_input))
-            if isinstance(output, str):
-                history_text = output[:500]
-            else:
-                n = len(response.get("issues") or [])
-                history_text = f"{n} issues" if n else "Assigned Issues"
-            history.append(("assistant", history_text))
-            history = history[-8:]
-
-            if response.get("type") == "clarification":
-                state.pending_request = effective_input
-            elif response.get("type") == "plan_preview":
-                state.pending_request = effective_input
-                state.pending_plan = response["plan"]
-            else:
-                state.pending_request = None
-        except AIAuthenticationError as e:
-            console.print(f"[red]Auth error: {e}[/red]")
-            console.print("[dim]Check your AI API key in .env[/dim]")
-        except AIRateLimitError as e:
-            console.print(f"[red]Rate limited: {e}[/red]")
-        except AITimeoutError:
-            console.print("[red]Sorry, the AI timed out. Please try again.[/red]")
-        except AIError as e:
-            logger = logging.getLogger(__name__)
-            logger.debug("AI error", exc_info=True)
-            if debug:
-                console.print(f"[red]AI error: {e}[/red]")
-            else:
-                console.print("[red]Sorry, I couldn't process that. Please try again or rephrase.[/red]")
-            console.print("[dim]Run with --debug for details[/dim]")
-        except Exception as e:
-            logging.getLogger(__name__).debug("Chat error", exc_info=True)
-            if debug:
-                console.print(f"[red]Error: {e}[/red]")
-            else:
-                console.print("[red]Sorry, something went wrong. Please try again.[/red]")
-            console.print("[dim]Run with --debug for details[/dim]")
+                bind_pending_from_response(state, response, effective_input)
+            except AIAuthenticationError as e:
+                console.print(f"[red]Auth error: {e}[/red]")
+                console.print("[dim]Check your AI API key in .env[/dim]")
+            except AIRateLimitError as e:
+                console.print(f"[red]Rate limited: {e}[/red]")
+            except AITimeoutError:
+                console.print("[red]Sorry, the AI timed out. Please try again.[/red]")
+            except AIError as e:
+                logger = logging.getLogger(__name__)
+                logger.debug("AI error", exc_info=True)
+                if debug:
+                    console.print(f"[red]AI error: {e}[/red]")
+                else:
+                    console.print("[red]Sorry, I couldn't process that. Please try again or rephrase.[/red]")
+                console.print("[dim]Run with --debug for details[/dim]")
+            except Exception as e:
+                logging.getLogger(__name__).debug("Chat error", exc_info=True)
+                if debug:
+                    console.print(f"[red]Error: {e}[/red]")
+                else:
+                    console.print("[red]Sorry, something went wrong. Please try again.[/red]")
+                console.print("[dim]Run with --debug for details[/dim]")
+    finally:
+        db.close()
 
 
 def _apply_chat_plan(plan, config) -> str:

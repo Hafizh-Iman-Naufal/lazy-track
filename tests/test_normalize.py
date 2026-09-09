@@ -6,7 +6,12 @@ from lazytrack.ai.base import AITimeoutError
 from lazytrack.ai.generate import generate_structured_intent
 from lazytrack.ai.normalize import ParseContext, parse_intent, timezone_from_text
 from lazytrack.ai.prompts import build_intent_prompt
-from lazytrack.ai.schemas import AllocateTimeIntent, ClarificationRequired, ShowWeekIntent
+from lazytrack.ai.schemas import (
+    AddLeaveIntent,
+    AllocateTimeIntent,
+    ClarificationRequired,
+    ShowWeekIntent,
+)
 from lazytrack.cli import _format_response
 from lazytrack.config import LazyTrackConfig
 from lazytrack.domain import Allocation, AllocationRequest, Planner, PlannerContext
@@ -117,6 +122,51 @@ class TestParseIntentLoggedGemini:
         intent = parse_intent({"type": "show_week", "week": "2026-w6"}, CTX)
         assert isinstance(intent, ShowWeekIntent)
         assert intent.week == "2026-W06"
+        assert intent.weeks == ["2026-W06"]
+
+    def test_show_week_date_range_fills_weeks(self):
+        intent = parse_intent(
+            {
+                "type": "show_week",
+                "start_date": "2026-08-03",
+                "end_date": "2026-08-16",
+            },
+            CTX,
+        )
+        assert isinstance(intent, ShowWeekIntent)
+        assert intent.weeks == ["2026-W32", "2026-W33"]
+
+    def test_add_leave_list_and_range(self):
+        listed = parse_intent(
+            {
+                "type": "add_leave",
+                "dates": ["2026-08-03", "2026-08-04", "2026-08-05"],
+            },
+            CTX,
+        )
+        spanned = parse_intent(
+            {
+                "type": "add_leave",
+                "start_date": "2026-08-03",
+                "end_date": "2026-08-05",
+            },
+            CTX,
+        )
+        assert isinstance(listed, AddLeaveIntent)
+        assert listed.dates == [date(2026, 8, 3), date(2026, 8, 4), date(2026, 8, 5)]
+        assert spanned.dates == listed.dates
+
+    def test_add_leave_validation_is_not_allocate_copy(self):
+        intent = parse_intent({"type": "add_leave"}, CTX)
+        assert isinstance(intent, ClarificationRequired)
+        assert "leave" in intent.reason.lower()
+        assert intent.missing_fields == ["date"]
+        assert "allocations" not in intent.missing_fields
+
+    def test_sync_intent_explains_cli(self):
+        intent = parse_intent({"type": "sync_jira"}, CTX)
+        assert isinstance(intent, ClarificationRequired)
+        assert "lazytrack sync" in intent.reason
 
     def test_prompt_includes_current_iso_week(self):
         prompt = build_intent_prompt(
@@ -127,6 +177,7 @@ class TestParseIntentLoggedGemini:
         )
         assert "Current ISO week: 2026-W36" in prompt
         assert '{"type": "show_week", "week": "2026-W36"}' in prompt
+        assert '"dates": ["2026-08-03", "2026-08-04", "2026-08-05"]' in prompt
 
     def test_multi_issue_remaining_is_resolved_in_order(self):
         intent = parse_intent(

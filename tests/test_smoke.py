@@ -5,7 +5,7 @@ from lazytrack import __version__
 
 
 def test_version():
-    assert __version__ == "0.1.0-dev"
+    assert __version__ == "0.1.1-dev"
 
 
 def test_package_import():
@@ -47,4 +47,4 @@ def test_cli_version():
     with contextlib.redirect_stdout(buffer):
         version()
     output = buffer.getvalue()
-    assert "0.1.0-dev" in output
+    assert "0.1.1-dev" in output

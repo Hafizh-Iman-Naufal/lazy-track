@@ -12,6 +12,7 @@ from lazytrack.domain.calendar import WorkCalendar
 from lazytrack.ui.chat import (
     ChatOrchestrator,
     ChatSessionState,
+    bind_pending_from_response,
     confirmation_reply,
     parse_chat_command,
     parse_status_week,
@@ -170,7 +171,7 @@ def test_print_chat_banner_includes_chat_and_version():
     print_chat_banner(console)
     text = console.export_text()
     assert "chat" in text
-    assert "0.1.0-dev" in text
+    assert "0.1.1-dev" in text
 
 
 def test_confirm_apply_to_jira_defaults_false(monkeypatch):
@@ -240,6 +241,7 @@ def test_chat_uses_prompt_session_history():
     source = inspect.getsource(chat)
     assert "PromptSession" in source
     assert "FileHistory" in source
+    assert "Clarification:" not in source
     assert "inquirer.text" not in source
     assert chat_history_path() == Path.home() / ".lazytrack" / "chat_history"
 
@@ -298,3 +300,91 @@ def test_format_response_issues_list_is_full_table(monkeypatch):
     assert isinstance(out, Table)
     assert out.row_count == 21
     assert out.caption == "21 issues total"
+
+
+def test_format_response_omits_empty_missing():
+    out = _format_response(
+        {"type": "clarification", "message": "Chat can't sync.", "missing": []},
+        None,
+    )
+    assert "Chat can't sync." in out
+    assert "Missing:" not in out
+
+
+def test_clarification_does_not_bind_pending_request():
+    state = ChatSessionState()
+    bind_pending_from_response(
+        state,
+        {"type": "clarification", "message": "Which date?"},
+        "mark leave",
+    )
+    assert state.pending_request is None
+    assert state.pending_plan is None
+
+
+def test_plan_preview_still_binds_pending():
+    state = ChatSessionState()
+    bind_pending_from_response(
+        state,
+        {"type": "plan_preview", "plan": object()},
+        "allocate 8h",
+    )
+    assert state.pending_request == "allocate 8h"
+    assert state.pending_plan is not None
+
+
+def test_multi_day_leave_persists(tmp_path):
+    from lazytrack.ai.schemas import AddLeaveIntent
+    from lazytrack.storage import CalendarRepository, Database
+
+    db = Database(tmp_path / "chat.db")
+    db.initialize()
+    repo = CalendarRepository(db.connect())
+    config = LazyTrackConfig()
+    calendar = WorkCalendar(config=config.work)
+    planner = Planner(
+        PlannerContext(
+            calendar=calendar,
+            assigned_issues=[],
+            user_worklogs=[],
+            managed_worklogs=[],
+        ),
+        config,
+    )
+    orch = ChatOrchestrator(
+        config, calendar, [], [], planner, calendar_repo=repo
+    )
+    result = orch.handle_intent(
+        AddLeaveIntent(dates=[date(2026, 8, 3), date(2026, 8, 4), date(2026, 8, 5)])
+    )
+    assert "2026-08-03, 2026-08-04, 2026-08-05" in result["message"]
+    stored = repo.get_all_leaves()
+    assert {entry.date for entry in stored} == {
+        date(2026, 8, 3),
+        date(2026, 8, 4),
+        date(2026, 8, 5),
+    }
+    db.close()
+
+
+def test_two_weeks_render_two_titles():
+    config = LazyTrackConfig()
+    calendar = WorkCalendar(config=config.work)
+    planner = Planner(
+        PlannerContext(
+            calendar=calendar,
+            assigned_issues=[],
+            user_worklogs=[],
+            managed_worklogs=[],
+        ),
+        config,
+    )
+    orch = ChatOrchestrator(config, calendar, [], [], planner)
+    result = orch.handle_intent(
+        ShowWeekIntent(weeks=["2026-W32", "2026-W33"])
+    )
+    console = Console(record=True, width=120, color_system=None)
+    console.print(_format_response(result, orch))
+    text = console.export_text()
+    assert "Week 2026-W32:" in text
+    assert "Week 2026-W33:" in text

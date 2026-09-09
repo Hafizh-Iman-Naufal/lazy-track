@@ -11,6 +11,16 @@ from lazytrack.domain.calendar import WorkCalendar
 _ISO_WEEK = re.compile(r"^(\d{4})-W(\d{2})$")
 
 
+def _day_note(calendar: WorkCalendar, d: date) -> str:
+    if d in calendar.leaves:
+        return "Leave"
+    if d in calendar.holidays:
+        return "Holiday"
+    if d.strftime("%a").lower()[:3] in calendar.config.weekend_days:
+        return "Weekend"
+    return ""
+
+
 def iso_week_id(d: date) -> str:
     year, week, _ = d.isocalendar()
     return f"{year}-W{week:02d}"
@@ -45,6 +55,7 @@ def week_status_renderable(
     table.add_column("Date", style="white")
     table.add_column("Expected", style="yellow")
     table.add_column("Logged", style="green")
+    table.add_column("Note", style="magenta")
 
     for i, day_name in enumerate(("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")):
         d = week_start + timedelta(days=i)
@@ -53,6 +64,7 @@ def week_status_renderable(
             d.isoformat(),
             f"{calendar.max_hours_for_date(d)}h",
             f"{logged_by_date.get(d, Decimal('0'))}h",
+            _day_note(calendar, d),
         )
 
     required = weekly.required_target + weekly.total_overtime

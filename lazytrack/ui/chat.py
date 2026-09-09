@@ -33,12 +33,14 @@ from lazytrack.domain.calendar import WorkCalendar
 from lazytrack.domain.planner import parse_hhmm
 from lazytrack.domain.tz import now_in_zone
 from lazytrack.jira.models import IssueSummary, WorklogEntry
+from lazytrack.storage import CalendarRepository
 from lazytrack.ui.status import iso_week_id, parse_iso_week
 
 CHAT_HELP = """\
 [bold]LazyTrack Chat[/bold]
 Allocate time (gaps and timezones), show issues or this week, and add leave or holidays.
 Plans preview first. Reply yes to apply, no to cancel, or describe a correction.
+Leave can cover several dates in one request.
 
 [bold]Slash commands[/bold] (no AI):
   /help     this message
@@ -50,7 +52,7 @@ Plans preview first. Reply yes to apply, no to cancel, or describe a correction.
 
 Up/down recalls previous lines (saved in ~/.lazytrack).
 Also: help, ?, exit, quit, q
-Sync issues with [cyan]lazytrack sync[/cyan] in another terminal.\
+Sync issues with [cyan]lazytrack sync[/cyan] in another terminal, then restart chat.\
 """
 
 
@@ -98,6 +100,17 @@ class ChatSessionState:
     def clear(self) -> None:
         self.pending_request = None
         self.pending_plan = None
+
+
+def bind_pending_from_response(
+    state: ChatSessionState, response: dict, effective_input: str
+) -> None:
+    if response.get("type") == "plan_preview":
+        state.pending_request = effective_input
+        state.pending_plan = response["plan"]
+        return
+    if state.pending_plan is None:
+        state.pending_request = None
 
 
 def confirmation_reply(text: str) -> Optional[bool]:
@@ -170,12 +183,14 @@ class ChatOrchestrator:
         issues: list[IssueSummary],
         worklogs: list[WorklogEntry],
         planner: Planner,
+        calendar_repo: Optional[CalendarRepository] = None,
     ):
         self.config = config
         self.calendar = calendar
         self.issues = issues
         self.worklogs = worklogs
         self.planner = planner
+        self.calendar_repo = calendar_repo
 
     def handle_intent(self, intent, timezone: Optional[str] = None) -> dict:
         if isinstance(intent, AllocateTimeIntent):
@@ -282,27 +297,38 @@ class ChatOrchestrator:
             self.calendar.add_overtime(OvertimeEntry(date=overtime.date, hours=hours))
 
     def _handle_show_week(self, intent: ShowWeekIntent) -> dict:
-        if intent.week:
+        week_ids = list(intent.weeks)
+        if intent.week and intent.week not in week_ids:
+            week_ids.insert(0, intent.week)
+        if not week_ids:
+            today = now_in_zone(self.config.work.timezone).date()
+            week_start = today - timedelta(days=today.weekday())
+            week_ids = [iso_week_id(week_start)]
+
+        week_starts = []
+        logged_by_weeks = []
+        for week_id in week_ids:
             try:
-                week_start = parse_iso_week(intent.week)
+                week_start = parse_iso_week(week_id)
             except ValueError:
                 return {
                     "type": "error",
-                    "message": f"Invalid week format: {intent.week}. Use YYYY-Www",
+                    "message": f"Invalid week format: {week_id}. Use YYYY-Www",
                 }
-        else:
-            today = now_in_zone(self.config.work.timezone).date()
-            week_start = today - timedelta(days=today.weekday())
+            week_starts.append(week_start)
+            logged_by_weeks.append(logged_hours_by_date(self.worklogs, week_start))
 
+        week_start = week_starts[0]
+        logged_by_date = logged_by_weeks[0]
         weekly = self.calendar.required_hours_for_week(week_start)
-        logged_by_date = logged_hours_by_date(self.worklogs, week_start)
         logged = sum(logged_by_date.values(), Decimal("0"))
-
         return {
             "type": "week_status",
             "week_start": week_start,
+            "week_starts": week_starts,
             "weekly": weekly,
             "logged_by_date": logged_by_date,
+            "logged_by_weeks": logged_by_weeks,
             "logged": logged,
             "missing": max(
                 Decimal("0"),
@@ -317,16 +343,27 @@ class ChatOrchestrator:
         }
 
     def _handle_add_leave(self, intent: AddLeaveIntent) -> dict:
-        hours = Decimal(str(intent.hours)) if intent.hours else Decimal("8")
-        leave = LeaveEntry(date=intent.date, hours=hours)
-        self.calendar.add_leave(leave)
+        hours = (
+            Decimal(str(intent.hours))
+            if intent.hours is not None
+            else Decimal(str(self.config.work.hours_per_day))
+        )
+        dates = list(intent.dates)
+        for work_date in dates:
+            leave = LeaveEntry(date=work_date, hours=hours)
+            self.calendar.add_leave(leave)
+            if self.calendar_repo:
+                self.calendar_repo.add_leave(leave)
+        listed = ", ".join(d.isoformat() for d in dates)
         return {
             "type": "success",
-            "message": f"Leave added for {intent.date}: {hours}h",
+            "message": f"Leave added for {listed}: {hours}h",
         }
 
     def _handle_remove_leave(self, intent: RemoveLeaveIntent) -> dict:
         removed = self.calendar.remove_leave(intent.date)
+        if self.calendar_repo:
+            removed = self.calendar_repo.remove_leave(intent.date) or removed
         if removed:
             return {
                 "type": "success",
@@ -340,6 +377,8 @@ class ChatOrchestrator:
     def _handle_add_holiday(self, intent: AddHolidayIntent) -> dict:
         holiday = HolidayEntry(date=intent.date, description=intent.description)
         self.calendar.add_holiday(holiday)
+        if self.calendar_repo:
+            self.calendar_repo.add_holiday(holiday)
         desc = f" ({intent.description})" if intent.description else ""
         return {
             "type": "success",
@@ -348,6 +387,8 @@ class ChatOrchestrator:
 
     def _handle_remove_holiday(self, intent: RemoveHolidayIntent) -> dict:
         removed = self.calendar.remove_holiday(intent.date)
+        if self.calendar_repo:
+            removed = self.calendar_repo.remove_holiday(intent.date) or removed
         if removed:
             return {
                 "type": "success",

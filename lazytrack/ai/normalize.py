@@ -201,6 +201,42 @@ def _normalize_gaps(raw: Any) -> list[dict[str, str]]:
     return gaps
 
 
+def _iso_week_id(d: date) -> str:
+    year, week, _ = d.isocalendar()
+    return f"{year}-W{week:02d}"
+
+
+def _normalize_iso_week(value: Any) -> Optional[str]:
+    if not isinstance(value, str):
+        return None
+    match = re.fullmatch(r"(\d{4})-w(\d{1,2})", value.strip(), re.IGNORECASE)
+    if not match:
+        return None
+    return f"{match.group(1)}-W{int(match.group(2)):02d}"
+
+
+def _weeks_covering(start: date, end: date) -> list[str]:
+    last = end if end >= start else start
+    weeks: list[str] = []
+    d = start
+    while d <= last:
+        wid = _iso_week_id(d)
+        if wid not in weeks:
+            weeks.append(wid)
+        d += timedelta(days=1)
+    return weeks
+
+
+def _inclusive_dates(start: date, end: date) -> list[date]:
+    last = end if end >= start else start
+    days: list[date] = []
+    d = start
+    while d <= last:
+        days.append(d)
+        d += timedelta(days=1)
+    return days
+
+
 def _gaps_from_text(text: str) -> list[dict[str, str]]:
     match = re.search(r"(\d{1,2}):(\d{2})\s*[-–]\s*(\d{1,2}):(\d{2})", text)
     if not match:
@@ -321,14 +357,44 @@ def normalize_intent_dict(data: dict[str, Any], ctx: ParseContext) -> dict[str, 
     if gaps:
         out["gaps"] = gaps
 
+    if intent_type in ("add_leave", "addleaveintent"):
+        parsed_dates: list[date] = []
+        raw_dates = out.get("dates")
+        if isinstance(raw_dates, list):
+            for item in raw_dates:
+                parsed = _parse_date_value(item, ctx.today)
+                if parsed:
+                    parsed_dates.append(parsed)
+        if parsed_dates:
+            out["dates"] = [d.isoformat() for d in parsed_dates]
+            out["date"] = parsed_dates[0].isoformat()
+        elif start:
+            last = end or start
+            days = _inclusive_dates(start, last)
+            out["dates"] = [d.isoformat() for d in days]
+            out["date"] = start.isoformat()
+            if last != start:
+                out["end_date"] = last.isoformat()
+
     if intent_type in ("show_week", "showweekintent"):
-        week = out.get("week")
-        if isinstance(week, str):
-            match = re.fullmatch(r"(\d{4})-w(\d{1,2})", week.strip(), re.IGNORECASE)
-            if match:
-                out["week"] = f"{match.group(1)}-W{int(match.group(2)):02d}"
+        weeks: list[str] = []
+        raw_weeks = out.get("weeks")
+        if isinstance(raw_weeks, list):
+            for item in raw_weeks:
+                wid = _normalize_iso_week(item)
+                if wid and wid not in weeks:
+                    weeks.append(wid)
+        week = _normalize_iso_week(out.get("week"))
+        if week and week not in weeks:
+            weeks.insert(0, week)
+        if not weeks and start:
+            weeks = _weeks_covering(start, end or start)
+        if weeks:
+            out["weeks"] = weeks
+            out["week"] = weeks[0]
     else:
         out.pop("week", None)
+        out.pop("weeks", None)
     return out
 
 
@@ -373,6 +439,14 @@ def parse_intent(raw: str | dict[str, Any], ctx: ParseContext):
         "clarificationrequired",
     }
     if intent_type and intent_type not in known:
+        if "sync" in intent_type:
+            return ClarificationRequired(
+                reason=(
+                    "Chat can't sync. Run `lazytrack sync` in another terminal, "
+                    "then restart chat."
+                ),
+                missing_fields=[],
+            )
         return ClarificationRequired(
             reason=(
                 "Sorry, I can't do that. LazyTrack only handles assigned issues, "
@@ -434,6 +508,26 @@ def parse_intent(raw: str | dict[str, Any], ctx: ParseContext):
     try:
         return IntentSchema.model_validate(normalized)
     except (ValidationError, ValueError, TypeError):
+        if intent_type in ("add_leave", "addleaveintent"):
+            return ClarificationRequired(
+                reason="Which dates should I mark as leave? Use YYYY-MM-DD.",
+                missing_fields=["date"],
+            )
+        if intent_type in ("show_week", "showweekintent"):
+            return ClarificationRequired(
+                reason="Which week should I show? Use YYYY-Www or a date range.",
+                missing_fields=["week"],
+            )
+        if intent_type in ("add_holiday", "addholidayintent", "remove_holiday", "removeholidayintent"):
+            return ClarificationRequired(
+                reason="Which date should I use for that holiday? Use YYYY-MM-DD.",
+                missing_fields=["date"],
+            )
+        if intent_type in ("remove_leave", "removeleveintent"):
+            return ClarificationRequired(
+                reason="Which leave date should I remove? Use YYYY-MM-DD.",
+                missing_fields=["date"],
+            )
         return ClarificationRequired(
             reason=(
                 "Sorry, I need a bit more detail. For allocation I need an issue key, "

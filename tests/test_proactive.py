@@ -128,3 +128,21 @@ class TestFormatWeekStatus:
         assert "Required:  40.0h" in text
         assert "Logged:    24h" in text
         assert "Missing:   16.0h" in text
+        assert "Weekend" in text
+
+    def test_format_notes_leave_and_holiday(self):
+        from rich.console import Console
+
+        from lazytrack.domain import HolidayEntry, LeaveEntry
+        from lazytrack.ui.status import week_status_renderable
+
+        week_start = date(2026, 8, 3)
+        calendar = WorkCalendar(config=LazyTrackConfig().work)
+        calendar.add_leave(LeaveEntry(date=date(2026, 8, 3), hours=Decimal("8")))
+        calendar.add_holiday(HolidayEntry(date=date(2026, 8, 4), description="x"))
+        console = Console(record=True, width=120, color_system=None)
+        console.print(week_status_renderable(week_start, calendar, {}))
+        text = console.export_text()
+        assert "Leave" in text
+        assert "Holiday" in text
+        assert "Weekend" in text

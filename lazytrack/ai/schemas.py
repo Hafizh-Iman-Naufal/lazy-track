@@ -1,4 +1,6 @@
-from datetime import date
+from __future__ import annotations
+
+from datetime import date, timedelta
 from enum import Enum
 from typing import Optional, Union, Annotated, Literal
 
@@ -76,6 +78,7 @@ class RemoveAllocationIntent(BaseModel):
 class ShowWeekIntent(BaseModel):
     type: Literal["show_week"] = "show_week"
     week: Optional[str] = None
+    weeks: list[str] = Field(default_factory=list)
 
 
 class ShowIssuesIntent(BaseModel):
@@ -84,8 +87,39 @@ class ShowIssuesIntent(BaseModel):
 
 class AddLeaveIntent(BaseModel):
     type: Literal["add_leave"] = "add_leave"
-    date: date
+    dates: list[date] = Field(default_factory=list)
+    end_date: Optional[date] = None
     hours: Optional[float] = Field(default=None, ge=0, le=24)
+
+    @model_validator(mode="before")
+    @classmethod
+    def hoist_single_date(cls, values):
+        if not isinstance(values, dict):
+            return values
+        data = dict(values)
+        days = list(data.get("dates") or [])
+        single = data.get("date")
+        if not days and single is not None:
+            days = [single]
+        data["dates"] = days
+        return data
+
+    @model_validator(mode="after")
+    def resolve_leave_dates(self):
+        days = list(self.dates)
+        if len(days) == 1 and self.end_date is not None:
+            start = days[0]
+            if self.end_date < start:
+                raise ValueError("end_date must be after start date")
+            days = []
+            d = start
+            while d <= self.end_date:
+                days.append(d)
+                d += timedelta(days=1)
+        if not days:
+            raise ValueError("add_leave requires date or dates")
+        self.dates = days
+        return self
 
 
 class RemoveLeaveIntent(BaseModel):
@@ -125,6 +159,8 @@ class IntentSchema(BaseModel):
     hours: Optional[float] = None
     hours_per_day: Optional[float] = None
     week: Optional[str] = None
+    weeks: Optional[list[str]] = None
+    dates: Optional[list[date]] = None
     description: Optional[str] = None
     reason: Optional[str] = None
     missing_fields: Optional[list[str]] = None
