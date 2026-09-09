@@ -1,8 +1,32 @@
 # LazyTrack
 
-AI-assisted Jira worklog CLI. You describe work in natural language or run explicit commands; a deterministic planner builds a preview; you confirm; then LazyTrack writes the worklogs to Jira.
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)](#requirements)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![CLI](https://img.shields.io/badge/cli-lazytrack-informational)](#install)
 
-The model never calls Jira itself.
+> Worklogs are a tax. This is tax evasion, but legal.
+
+AI-assisted Jira worklog CLI. Describe work in natural language or run commands; a planner builds a preview; you confirm; LazyTrack writes the worklogs.
+
+**The model never calls Jira itself.**
+
+## Features
+
+- Natural-language **chat** or explicit CLI commands
+- Deterministic planner with **preview-then-confirm** before any Jira write
+- Leave, holidays, weekly status, undo, and audit
+- Does **not** create, delete, or transition issues, or edit handmade worklogs
+
+## Table of contents
+
+- [Requirements](#requirements)
+- [Install](#install)
+- [Configure](#configure)
+- [Quick start](#quick-start)
+- [Chat](#chat)
+- [Safety model](#safety-model)
+- [Development](#development)
+- [License](#license)
 
 ## Requirements
 
