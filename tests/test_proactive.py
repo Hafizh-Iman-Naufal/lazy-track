@@ -65,7 +65,7 @@ class TestSuggestMissingHours:
         result = suggest_missing_hours(week_start, calendar, logged)
 
         assert result is not None
-        assert "8.0h unallocated" in result
+        assert "8h unallocated" in result
         assert "Friday need hours" in result
         assert "Monday" not in result
 
@@ -125,9 +125,9 @@ class TestFormatWeekStatus:
         text = console.export_text()
 
         assert "Week 2026-W36: 2026-08-31 - 2026-09-06" in text
-        assert "Required:  40.0h" in text
+        assert "Required:  40h" in text
         assert "Logged:    24h" in text
-        assert "Missing:   16.0h" in text
+        assert "Missing:   16h" in text
         assert "Weekend" in text
 
     def test_format_notes_leave_and_holiday(self):

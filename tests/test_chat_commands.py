@@ -13,6 +13,8 @@ from lazytrack.ui.chat import (
     ChatOrchestrator,
     ChatSessionState,
     bind_pending_from_response,
+    chat_completer,
+    chat_prompt,
     confirmation_reply,
     effective_user_input,
     parse_chat_command,
@@ -160,7 +162,7 @@ def test_selected_week_status_includes_all_dates_and_daily_logged():
     assert "Week 2026-W36: 2026-08-31 - 2026-09-06" in text
     assert "2026-08-31" in text
     assert "2026-09-06" in text
-    assert "8.5h" in text
+    assert "8h 30m" in text
 
 
 def test_print_chat_banner_includes_chat_and_version():
@@ -441,3 +443,79 @@ def test_two_weeks_render_two_titles():
     text = console.export_text()
     assert "Week 2026-W32:" in text
     assert "Week 2026-W33:" in text
+
+
+def test_plan_preview_table_keeps_long_issue_key():
+    from datetime import timedelta
+
+    from lazytrack.jira.models import IssueSummary
+
+    key = "SP-1234567890"
+    assert len(key) > 10
+    config = LazyTrackConfig()
+    calendar = WorkCalendar(config=config.work)
+    issue = IssueSummary(
+        key=key,
+        summary="Story",
+        issue_type="Story",
+        status="In Progress",
+        project_key="SP",
+    )
+    planner = Planner(PlannerContext(calendar, [issue], [], []), config)
+    orch = ChatOrchestrator(config, calendar, [issue], [], planner)
+    work_date = date.today()
+    if work_date.weekday() >= 5:
+        work_date -= timedelta(days=work_date.weekday() - 4)
+
+    result = orch.handle_intent(
+        AllocateTimeIntent(
+            worklogs=[WorklogItem(date=work_date, issue_key=key, hours=9)]
+        )
+    )
+    assert result["type"] == "plan_preview"
+
+    console = Console(record=True, width=120, color_system=None)
+    console.print(_format_response(result, orch))
+    text = console.export_text()
+    assert result["plan"].id in text
+    assert key in text
+    assert "Overtime to register" in text
+    assert "Reply yes to apply, no to cancel, or describe a correction." in text
+    assert "Start-End" in text
+    assert "Hours" in text
+
+
+def test_chat_prompt_tracks_pending_plan():
+    state = ChatSessionState()
+    assert chat_prompt(state) == "> "
+    state.pending_plan = object()
+    assert chat_prompt(state) == "yes/no or a correction> "
+    state.pending_plan = None
+    assert chat_prompt(state) == "> "
+
+
+def test_completer_offers_slash_names_not_natural_language():
+    from prompt_toolkit.completion import CompleteEvent
+    from prompt_toolkit.document import Document
+
+    completer = chat_completer()
+    event = CompleteEvent()
+    offered = {item.text for item in completer.get_completions(Document("/"), event)}
+    assert offered == {"/help", "/status", "/issues", "/clear", "/exit"}
+    sentence = "allocate 8 hours on SP-8412"
+    assert parse_chat_command(sentence) is None
+    assert list(completer.get_completions(Document(sentence), event)) == []
+
+
+def test_print_chat_banner_narrow_skips_ascii():
+    from lazytrack.ui.banner import print_chat_banner
+
+    console = Console(
+        record=True, width=60, height=20, legacy_windows=False, color_system=None
+    )
+    print_chat_banner(console)
+    text = console.export_text()
+    assert "0.1.2-dev" in text
+    assert "type /help" in text
+    assert "_____" not in text
+    assert "\n" not in text.strip()

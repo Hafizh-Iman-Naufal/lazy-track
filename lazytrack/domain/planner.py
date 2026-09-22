@@ -6,6 +6,7 @@ from typing import Optional
 
 from lazytrack.config import LazyTrackConfig
 from lazytrack.domain.calendar import WorkCalendar, create_calendar
+from lazytrack.domain.duration import format_hours
 from lazytrack.domain.tz import now_in_zone, zone_for, parse_hhmm
 from lazytrack.domain import OvertimeEntry
 from lazytrack.domain.window import plan_span_ok, write_date_ok
@@ -397,16 +398,16 @@ class Planner:
                     schedule = f"{op.started_at:%H:%M}-{end:%H:%M}"
                     timezone = getattr(op.started_at.tzinfo, "key", None) or timezone
                 lines.append(
-                    f"{op.work_date}  {op.issue_key:<10} {schedule:<13} {hours}h    {timezone}"
+                    f"{op.work_date}  {op.issue_key:<10} {schedule:<13} {format_hours(hours)}    {timezone}"
                 )
                 total_seconds += op.seconds
         
         total_hours = Decimal(str(total_seconds)) / 3600
         lines.append("-" * 68)
-        lines.append(f"Total: {total_hours}h")
+        lines.append(f"Total: {format_hours(total_hours)}")
         for overtime in plan.overtime:
             lines.append(
-                f"Overtime to register: {overtime.date}  {overtime.hours}h"
+                f"Overtime to register: {overtime.date}  {format_hours(overtime.hours)}"
             )
         lines.append("")
         lines.append("No Jira changes have been made. Reply yes to apply, no to cancel,")

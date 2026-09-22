@@ -4,6 +4,8 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Optional
 
+from prompt_toolkit.completion import WordCompleter
+
 from lazytrack.ai.normalize import parse_followup_date
 from lazytrack.ai.schemas import (
     AllocationItem,
@@ -31,6 +33,7 @@ from lazytrack.domain import (
     OvertimeEntry,
 )
 from lazytrack.domain.calendar import WorkCalendar
+from lazytrack.domain.duration import format_hours
 from lazytrack.domain.planner import parse_hhmm
 from lazytrack.domain.tz import now_in_zone
 from lazytrack.jira.models import IssueSummary, WorklogEntry
@@ -55,6 +58,17 @@ Up/down recalls previous lines (saved in ~/.lazytrack).
 Also: help, ?, exit, quit, q
 Sync issues with [cyan]lazytrack sync[/cyan] in another terminal, then restart chat.\
 """
+
+
+CHAT_COMMANDS = ("/help", "/status", "/issues", "/clear", "/exit")
+
+
+def chat_toolbar() -> str:
+    return "  ".join(CHAT_COMMANDS)
+
+
+def chat_completer() -> WordCompleter:
+    return WordCompleter(list(CHAT_COMMANDS), sentence=True)
 
 
 def chat_history_path() -> Path:
@@ -101,6 +115,12 @@ class ChatSessionState:
     def clear(self) -> None:
         self.pending_request = None
         self.pending_plan = None
+
+
+def chat_prompt(state: ChatSessionState) -> str:
+    if state.pending_plan is not None:
+        return "yes/no or a correction> "
+    return "> "
 
 
 def bind_pending_from_response(
@@ -186,7 +206,7 @@ def suggest_missing_hours(
     if missing_dates:
         date_list = ", ".join(missing_dates)
         return (
-            f"You still have {missing}h unallocated in {iso_week_id(week_start)}. "
+            f"You still have {format_hours(missing)} unallocated in {iso_week_id(week_start)}. "
             f"{date_list} need hours. "
             f"Would you like to allocate them?"
         )
@@ -375,7 +395,7 @@ class ChatOrchestrator:
         listed = ", ".join(d.isoformat() for d in dates)
         return {
             "type": "success",
-            "message": f"Leave added for {listed}: {hours}h",
+            "message": f"Leave added for {listed}: {format_hours(hours)}",
         }
 
     def _handle_remove_leave(self, intent: RemoveLeaveIntent) -> dict:

@@ -11,6 +11,12 @@ CHAT_BANNER = r"""
 
 
 def print_chat_banner(console) -> None:
+    if console.width < 80:
+        console.print(
+            f"[bold cyan]chat[/bold cyan] [dim]v{__version__}  type /help[/dim]",
+            highlight=False,
+        )
+        return
     console.print(f"[bold cyan]{CHAT_BANNER}[/bold cyan]", highlight=False)
     console.print(f"         [dim]chat  v{__version__}[/dim]", highlight=False)
     console.print("[dim]  type /help or exit[/dim]", highlight=False)

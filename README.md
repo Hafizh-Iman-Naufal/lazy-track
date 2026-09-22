@@ -152,7 +152,7 @@ lazytrack chat --debug
 lazytrack chat --help
 ```
 
-Natural language covers assigned issues, this week’s hours, allocating time, leave, and holidays. Worklog requests always show an exact **preview** first. Reply `yes` to apply it, `no` to cancel it, or describe a correction to receive a revised preview. Chat never writes a previewed plan without that explicit next-turn confirmation. Leave and holidays apply immediately and are saved locally (several dates or a range in one leave request is fine). Chat cannot run `lazytrack sync`; do that in another terminal, then restart chat so `/status` reloads the cache.
+Natural language covers assigned issues, this week’s hours, allocating time, leave, and holidays. While the model is working, chat shows `Thinking...`; Ctrl+C cancels that wait and returns to the prompt without applying. Worklog requests always show an exact **preview** first: a table of date, issue, start–end, hours, and timezone, then the plan id, total, any overtime lines, and the yes/no line. Reply `yes` to apply it, `no` to cancel it, or describe a correction to receive a revised preview. Until you answer, the prompt is `yes/no or a correction> `. Chat never writes a previewed plan without that explicit next-turn confirmation. Leave and holidays apply immediately and are saved locally (several dates or a range in one leave request is fine). Chat cannot run `lazytrack sync`; do that in another terminal, then restart chat so `/status` reloads the cache.
 
 Weekly status uses ISO week IDs and the same Monday–Sunday table in CLI and chat, including a Note column (`Leave`, `Holiday`, `Weekend`). For example, `lazytrack status --week 2026-W36`, `/status 2026-W36`, and “show my status for 2026-W36” all display `Week 2026-W36: 2026-08-31 - 2026-09-06`. Two ranges in one question can render two week tables.
 
@@ -202,8 +202,8 @@ DATE         ISSUE      START-END     HOURS  TIMEZONE
 2026-03-17  ABC-103    16:00-21:00   5h    UTC
 --------------------------------------------------------------------
 Total: 22h
-Overtime to register: 2026-03-16  2.0h
-Overtime to register: 2026-03-17  4.0h
+Overtime to register: 2026-03-16  2h
+Overtime to register: 2026-03-17  4h
 
 No Jira changes have been made. Reply yes to apply, no to cancel,
 or describe a correction.

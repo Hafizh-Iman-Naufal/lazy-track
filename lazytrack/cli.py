@@ -11,6 +11,7 @@ from prompt_toolkit import PromptSession
 from prompt_toolkit.history import FileHistory
 from rich.console import Console, Group
 from rich.table import Table
+from rich.text import Text
 
 from lazytrack import __version__
 from lazytrack.ai.base import AIError, AIAuthenticationError, AIRateLimitError, AITimeoutError
@@ -26,6 +27,8 @@ from lazytrack.ai.providers.opencode import OpenCodeProvider
 from lazytrack.config import load_config, redact_secrets
 from lazytrack.domain import LeaveEntry, HolidayEntry
 from lazytrack.domain.calendar import create_calendar
+from lazytrack.domain.duration import format_hours
+from lazytrack.domain.planner import OperationStatus
 from lazytrack.jira import (
     JiraClient,
     RestrictiveJiraGateway,
@@ -41,7 +44,10 @@ from lazytrack.ui.chat import (
     ChatSessionState,
     ChatOrchestrator,
     bind_pending_from_response,
+    chat_completer,
     chat_history_path,
+    chat_prompt,
+    chat_toolbar,
     confirmation_reply,
     effective_user_input,
     parse_chat_command,
@@ -366,7 +372,9 @@ def leave_add(
     leave = LeaveEntry(date=d, hours=Decimal(str(hours)), description=description)
     try:
         repo.add_leave(leave)
-        console.print(f"[green]Leave added for {date_str}: {hours}h[/green]")
+        console.print(
+            f"[green]Leave added for {date_str}: {format_hours(Decimal(str(hours)))}[/green]"
+        )
     except Exception as e:
         console.print(f"[red]Error adding leave: {e}[/red]")
         raise typer.Exit(1)
@@ -513,7 +521,7 @@ def plan_show(
             op.operation_type.value,
             op.issue_key,
             op.work_date.isoformat(),
-            f"{hours}h",
+            format_hours(hours),
         )
 
     console.print(table)
@@ -690,6 +698,39 @@ def _create_ai_provider(config):
     else:
         raise typer.Exit(f"Unknown AI provider: {provider_name}")
 
+def _plan_preview_renderable(plan, timezone: str) -> Group:
+    table = Table(title="Proposed plan preview")
+    table.add_column("Date")
+    table.add_column("Issue", overflow="fold")
+    table.add_column("Start-End")
+    table.add_column("Hours", justify="right")
+    table.add_column("Timezone")
+
+    total_seconds = 0
+    for op in sorted(plan.operations, key=lambda item: item.work_date):
+        if op.status != OperationStatus.PENDING:
+            continue
+        hours = Decimal(str(op.seconds)) / 3600
+        schedule = "-"
+        op_tz = timezone
+        if op.started_at:
+            end = op.started_at + timedelta(seconds=op.seconds)
+            schedule = f"{op.started_at:%H:%M}-{end:%H:%M}"
+            op_tz = getattr(op.started_at.tzinfo, "key", None) or timezone
+        table.add_row(str(op.work_date), op.issue_key, schedule, format_hours(hours), op_tz)
+        total_seconds += op.seconds
+
+    total_hours = Decimal(str(total_seconds)) / 3600
+    lines = [f"Plan: {plan.id}", f"Total: {format_hours(total_hours)}"]
+    for overtime in plan.overtime:
+        lines.append(
+            f"Overtime to register: {overtime.date}  {format_hours(overtime.hours)}"
+        )
+    lines.append("")
+    lines.append("No Jira changes have been made.")
+    lines.append("Reply yes to apply, no to cancel, or describe a correction.")
+    return Group(table, Text("\n".join(lines)))
+
 def _format_response(response: dict, orchestrator: ChatOrchestrator) -> object:
     rtype = response.get("type")
     msg = response.get("message", "")
@@ -706,6 +747,12 @@ def _format_response(response: dict, orchestrator: ChatOrchestrator) -> object:
             return f"[yellow]{msg}[/yellow]\nMissing: {', '.join(missing)}"
         return f"[yellow]{msg}[/yellow]"
     elif rtype == "plan_preview":
+        plan = response.get("plan")
+        if plan is not None and getattr(plan, "operations", None) is not None:
+            timezone = "UTC"
+            if orchestrator is not None:
+                timezone = orchestrator.config.work.timezone
+            return _plan_preview_renderable(plan, timezone)
         preview = response.get("preview", "")
         if isinstance(preview, str):
             return f"[bold]Proposed plan preview:[/bold]\n{preview}"
@@ -814,6 +861,7 @@ def chat(debug: bool = typer.Option(False, "--debug", "-d", help="Enable debug l
 
     if not issues:
         console.print("[yellow]No issues in cache. Run: lazytrack sync[/yellow]")
+        console.print("[dim]/status and calendar commands still work.[/dim]")
         console.print()
 
     suggestion = orchestrator.get_proactive_suggestion()
@@ -825,12 +873,16 @@ def chat(debug: bool = typer.Option(False, "--debug", "-d", help="Enable debug l
     state = ChatSessionState()
     tz_name = config.work.timezone
     issue_keys = [i.key for i in issues]
-    session = PromptSession(history=FileHistory(str(chat_history_path())))
+    session = PromptSession(
+        history=FileHistory(str(chat_history_path())),
+        completer=chat_completer(),
+        bottom_toolbar=chat_toolbar,
+    )
 
     try:
         while True:
             try:
-                user_input = session.prompt("> ")
+                user_input = session.prompt(chat_prompt(state))
             except (KeyboardInterrupt, EOFError):
                 console.print("\n[dim]Goodbye![/dim]")
                 break
@@ -873,6 +925,7 @@ def chat(debug: bool = typer.Option(False, "--debug", "-d", help="Enable debug l
                     console.print(output)
                     continue
 
+                saved_plan = None
                 if state.pending_plan is not None:
                     decision = confirmation_reply(user_input)
                     if decision is True:
@@ -887,6 +940,7 @@ def chat(debug: bool = typer.Option(False, "--debug", "-d", help="Enable debug l
                         state.clear()
                         console.print("[dim]Plan cancelled. Nothing was written to Jira.[/dim]")
                         continue
+                    saved_plan = state.pending_plan
                     effective_input = (
                         f"{state.pending_request or ''}\nCorrection: {user_input}".strip()
                     )
@@ -928,13 +982,25 @@ def chat(debug: bool = typer.Option(False, "--debug", "-d", help="Enable debug l
                     window_end=w_end,
                 )
 
-                intent = asyncio.run(generate_structured_intent(ai_provider, prompt, ctx))
+                try:
+                    with console.status("Thinking..."):
+                        intent = asyncio.run(
+                            generate_structured_intent(ai_provider, prompt, ctx)
+                        )
+                except KeyboardInterrupt:
+                    if saved_plan is not None:
+                        state.pending_plan = saved_plan
+                    console.print("\n[dim]Cancelled.[/dim]")
+                    continue
                 response = orchestrator.handle_intent(intent, timezone=request_tz)
                 output = _format_response(response, orchestrator)
                 console.print(output)
                 history.append(("user", user_input))
+                preview = response.get("preview")
                 if isinstance(output, str):
                     history_text = output[:500]
+                elif response.get("type") == "plan_preview" and isinstance(preview, str):
+                    history_text = preview[:500]
                 else:
                     n = len(response.get("issues") or [])
                     history_text = f"{n} issues" if n else "Assigned Issues"

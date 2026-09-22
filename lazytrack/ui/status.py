@@ -7,6 +7,7 @@ from rich.table import Table
 from rich.text import Text
 
 from lazytrack.domain.calendar import WorkCalendar
+from lazytrack.domain.duration import format_hours
 
 _ISO_WEEK = re.compile(r"^(\d{4})-W(\d{2})$")
 
@@ -62,8 +63,8 @@ def week_status_renderable(
         table.add_row(
             day_name,
             d.isoformat(),
-            f"{calendar.max_hours_for_date(d)}h",
-            f"{logged_by_date.get(d, Decimal('0'))}h",
+            format_hours(calendar.max_hours_for_date(d)),
+            format_hours(logged_by_date.get(d, Decimal("0"))),
             _day_note(calendar, d),
         )
 
@@ -71,8 +72,8 @@ def week_status_renderable(
     missing = max(Decimal("0"), required - total_logged)
     summary = Text.from_markup(
         "\n[bold]Summary:[/bold]\n"
-        f"  Required:  {required}h\n"
-        f"  Logged:    {total_logged}h\n"
-        f"  Missing:   {missing}h"
+        f"  Required:  {format_hours(required)}\n"
+        f"  Logged:    {format_hours(total_logged)}\n"
+        f"  Missing:   {format_hours(missing)}"
     )
     return Group(table, summary)
