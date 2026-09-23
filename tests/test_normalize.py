@@ -4,7 +4,13 @@ from unittest.mock import AsyncMock
 
 from lazytrack.ai.base import AITimeoutError
 from lazytrack.ai.generate import generate_structured_intent
-from lazytrack.ai.normalize import ParseContext, parse_intent, timezone_from_text
+from lazytrack.ai.normalize import (
+    ParseContext,
+    extract_date_spans,
+    parse_intent,
+    route_utterance,
+    timezone_from_text,
+)
 from lazytrack.ai.prompts import build_intent_prompt
 from lazytrack.ai.schemas import (
     AddHolidayIntent,
@@ -219,10 +225,11 @@ class TestParseIntentLoggedGemini:
         assert intent.missing_fields == ["date"]
         assert "allocations" not in intent.missing_fields
 
-    def test_sync_intent_explains_cli(self):
+    def test_sync_type_is_not_a_chat_refusal(self):
         intent = parse_intent({"type": "sync_jira"}, CTX)
         assert isinstance(intent, ClarificationRequired)
-        assert "lazytrack sync" in intent.reason
+        assert "lazytrack sync" not in intent.reason.lower()
+        assert "can't sync" not in intent.reason.lower()
 
     def test_prompt_includes_current_iso_week(self):
         prompt = build_intent_prompt(
@@ -488,3 +495,129 @@ class TestTimeoutRetry:
         intent = asyncio.run(generate_structured_intent(provider, "hello", CTX))
         assert isinstance(intent, ClarificationRequired)
         assert "timed out" in intent.reason.lower()
+
+
+def _ctx(message: str, **kwargs) -> ParseContext:
+    return ParseContext(
+        today=date(2026, 9, 4),
+        timezone="Asia/Makassar",
+        hours_per_day=8.0,
+        issue_keys=["SP-8412"],
+        user_message=message,
+        **kwargs,
+    )
+
+
+class TestConversationalSpans:
+    def test_logged_hours_range_is_one_iso_week(self):
+        intent = parse_intent(
+            {"type": "clarification_required", "reason": "which week?"},
+            _ctx("check my logged hours for August 03 - August 09"),
+        )
+        assert isinstance(intent, ShowWeekIntent)
+        assert intent.weeks == ["2026-W32"]
+
+        paraphrase = parse_intent(
+            {"type": "show_week"},
+            _ctx("what hours did I log from Aug 3 until Aug 9"),
+        )
+        assert paraphrase.weeks == ["2026-W32"]
+
+    def test_show_second_august_range_is_next_week(self):
+        intent = parse_intent(
+            {"type": "show_week"},
+            _ctx("show August 10 - August 16"),
+        )
+        assert isinstance(intent, ShowWeekIntent)
+        assert intent.weeks == ["2026-W33"]
+
+    def test_two_ranges_in_one_message_are_two_weeks(self):
+        message = (
+            "check my logged hours for August 03 - August 09 "
+            "and show August 10 - August 16"
+        )
+        intent = parse_intent(
+            {"type": "clarification_required", "reason": "which week?"},
+            _ctx(message),
+        )
+        assert isinstance(intent, ShowWeekIntent)
+        assert intent.weeks == ["2026-W32", "2026-W33"]
+
+    def test_leave_list_overrides_allocate_time(self):
+        message = "mark 2026-08-03, 2026-08-04 and 2026-08-05 as leave"
+        intent = parse_intent(
+            {"type": "allocate_time", "issue_key": "SP-8412", "hours": 8},
+            _ctx(message),
+        )
+        assert isinstance(intent, AddLeaveIntent)
+        assert intent.dates == [date(2026, 8, 3), date(2026, 8, 4), date(2026, 8, 5)]
+        assert intent.hours is None
+
+    def test_month_name_ranges_and_shared_month_list(self):
+        expected = [date(2026, 8, 3), date(2026, 8, 4), date(2026, 8, 5)]
+        for message in (
+            "August 3 to August 5",
+            "from August 3 through August 5",
+            "3, 4 and 5 August",
+            "please use Aug 3 until Aug 5",
+        ):
+            spans = extract_date_spans(message, date(2026, 9, 4))
+            assert spans.dates == expected, message
+
+    def test_weekday_range_uses_the_current_week(self):
+        spans = extract_date_spans("Monday through Wednesday", date(2026, 9, 4))
+        assert spans.dates == [date(2026, 8, 31), date(2026, 9, 1), date(2026, 9, 2)]
+
+    def test_missing_year_uses_focus_month_else_today(self):
+        focused = extract_date_spans(
+            "August 10",
+            date(2026, 9, 4),
+            focus_dates=[date(2025, 8, 6)],
+        )
+        assert focused.dates == [date(2025, 8, 10)]
+        unfocused = extract_date_spans(
+            "August 10",
+            date(2026, 9, 4),
+            focus_dates=[date(2025, 9, 6)],
+        )
+        assert unfocused.dates == [date(2026, 8, 10)]
+
+    def test_day_number_without_month_or_focus_asks(self):
+        intent = parse_intent({"type": "add_leave"}, _ctx("mark 3 as leave"))
+        assert isinstance(intent, ClarificationRequired)
+        assert intent.reason == "Which month should I use?"
+        assert "Missing:" not in intent.reason
+
+    def test_sync_phrase_is_the_sync_route(self):
+        for message in ("sync the jira now", "please refresh jira", "update the jira cache"):
+            assert route_utterance(message) == "sync"
+            intent = parse_intent(
+                {"type": "clarification_required", "reason": "Chat can't sync."},
+                _ctx(message),
+            )
+            assert intent.type == "sync"
+            assert not isinstance(intent, ClarificationRequired)
+        assert route_utterance("update the hours on Friday") is None
+
+    def test_allocation_without_issue_asks_for_the_issue(self):
+        intent = parse_intent(
+            {
+                "type": "allocate_time",
+                "start_date": "2026-09-04",
+                "end_date": "2026-09-04",
+                "hours": 8,
+            },
+            _ctx("allocate 8 hours today"),
+        )
+        assert isinstance(intent, ClarificationRequired)
+        assert "issue" in intent.reason.lower()
+        out = _format_response(
+            {
+                "type": "clarification",
+                "message": intent.reason,
+                "missing": intent.missing_fields,
+            },
+            None,
+        )
+        assert "Missing: start_date" not in out
+        assert "Missing:" not in out

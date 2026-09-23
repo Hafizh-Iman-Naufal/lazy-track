@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, time, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -6,7 +6,7 @@ from typing import Optional
 
 from prompt_toolkit.completion import WordCompleter
 
-from lazytrack.ai.normalize import parse_followup_date
+from lazytrack.ai.normalize import asks_missing_hours, parse_followup_date
 from lazytrack.ai.schemas import (
     AllocationItem,
     AddHolidayIntent,
@@ -38,7 +38,7 @@ from lazytrack.domain.planner import parse_hhmm
 from lazytrack.domain.tz import now_in_zone
 from lazytrack.jira.models import IssueSummary, WorklogEntry
 from lazytrack.storage import CalendarRepository
-from lazytrack.ui.status import iso_week_id, parse_iso_week
+from lazytrack.ui.status import format_month_day, iso_week_id, parse_iso_week
 
 CHAT_HELP = """\
 [bold]LazyTrack Chat[/bold]
@@ -56,7 +56,7 @@ Leave can cover several dates in one request.
 
 Up/down recalls previous lines (saved in ~/.lazytrack).
 Also: help, ?, exit, quit, q
-Sync issues with [cyan]lazytrack sync[/cyan] in another terminal, then restart chat.\
+Ask to sync Jira here, or run [cyan]lazytrack sync[/cyan].\
 """
 
 
@@ -111,10 +111,41 @@ def _parse_gap(start: str, end: str) -> tuple[time, time]:
 class ChatSessionState:
     pending_request: Optional[str] = None
     pending_plan: object = None
+    focus_weeks: list[str] = field(default_factory=list)
+    focus_dates: list[date] = field(default_factory=list)
 
     def clear(self) -> None:
         self.pending_request = None
         self.pending_plan = None
+        self.focus_weeks = []
+        self.focus_dates = []
+
+
+def remember_chat_focus(state: ChatSessionState, response: dict) -> None:
+    if response.get("type") == "week_status":
+        starts = list(response.get("week_starts") or [])
+        if not starts and response.get("week_start"):
+            starts = [response["week_start"]]
+        state.focus_weeks = [iso_week_id(start) for start in starts]
+        dates: list[date] = []
+        for start in starts:
+            dates.extend(start + timedelta(days=offset) for offset in range(7))
+        state.focus_dates = dates
+        return
+    if response.get("type") == "success" and response.get("dates"):
+        state.focus_dates = list(response["dates"])
+        weeks: list[str] = []
+        for day in state.focus_dates:
+            week_id = iso_week_id(day)
+            if week_id not in weeks:
+                weeks.append(week_id)
+        state.focus_weeks = weeks
+
+
+def annotate_week_response(response: dict, user_text: str) -> dict:
+    if response.get("type") == "week_status" and asks_missing_hours(user_text):
+        response["show_missing"] = True
+    return response
 
 
 def chat_prompt(state: ChatSessionState) -> str:
@@ -392,10 +423,13 @@ class ChatOrchestrator:
             self.calendar.add_leave(leave)
             if self.calendar_repo:
                 self.calendar_repo.add_leave(leave)
-        listed = ", ".join(d.isoformat() for d in dates)
+        lines = ["Added leave:"]
+        for work_date in dates:
+            lines.append(f"{format_month_day(work_date)}  {format_hours(hours)}")
         return {
             "type": "success",
-            "message": f"Leave added for {listed}: {format_hours(hours)}",
+            "message": "\n".join(lines),
+            "dates": dates,
         }
 
     def _handle_remove_leave(self, intent: RemoveLeaveIntent) -> dict:
@@ -412,6 +446,7 @@ class ChatOrchestrator:
             return {
                 "type": "success",
                 "message": f"Leave removed for {listed}",
+                "dates": removed_days,
             }
         return {
             "type": "info",
@@ -430,6 +465,7 @@ class ChatOrchestrator:
         return {
             "type": "success",
             "message": f"Holiday added for {listed}{desc}",
+            "dates": days,
         }
 
     def _handle_remove_holiday(self, intent: RemoveHolidayIntent) -> dict:
@@ -446,6 +482,7 @@ class ChatOrchestrator:
             return {
                 "type": "success",
                 "message": f"Holiday removed for {listed}",
+                "dates": removed_days,
             }
         return {
             "type": "info",

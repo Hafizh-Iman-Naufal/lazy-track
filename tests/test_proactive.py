@@ -124,7 +124,7 @@ class TestFormatWeekStatus:
         console.print(week_status_renderable(week_start, calendar, logged))
         text = console.export_text()
 
-        assert "Week 2026-W36: 2026-08-31 - 2026-09-06" in text
+        assert "Week 2026-W36 · Aug 31–Sep 6" in text
         assert "Required:  40h" in text
         assert "Logged:    24h" in text
         assert "Missing:   16h" in text

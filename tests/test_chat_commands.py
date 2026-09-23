@@ -4,15 +4,24 @@ from decimal import Decimal
 import pytest
 from rich.console import Console
 
-from lazytrack.ai.schemas import AllocateTimeIntent, ShowWeekIntent, WorklogItem
-from lazytrack.cli import _format_response
+from lazytrack.ai.normalize import ParseContext, parse_intent, route_utterance
+from lazytrack.ai.schemas import (
+    AddLeaveIntent,
+    AllocateTimeIntent,
+    ClarificationRequired,
+    ShowWeekIntent,
+    WorklogItem,
+)
+from lazytrack.cli import _format_response, _history_text
 from lazytrack.config import LazyTrackConfig
 from lazytrack.domain import Planner, PlannerContext
 from lazytrack.domain.calendar import WorkCalendar
 from lazytrack.ui.chat import (
     ChatOrchestrator,
     ChatSessionState,
+    annotate_week_response,
     bind_pending_from_response,
+    remember_chat_focus,
     chat_completer,
     chat_prompt,
     confirmation_reply,
@@ -159,7 +168,7 @@ def test_selected_week_status_includes_all_dates_and_daily_logged():
     console.print(_format_response(result, orch))
     text = console.export_text()
 
-    assert "Week 2026-W36: 2026-08-31 - 2026-09-06" in text
+    assert "Week 2026-W36 · Aug 31–Sep 6" in text
     assert "2026-08-31" in text
     assert "2026-09-06" in text
     assert "8h 30m" in text
@@ -387,7 +396,7 @@ def test_multi_day_leave_persists(tmp_path):
     result = orch.handle_intent(
         AddLeaveIntent(dates=[date(2026, 8, 3), date(2026, 8, 4), date(2026, 8, 5)])
     )
-    assert "2026-08-03, 2026-08-04, 2026-08-05" in result["message"]
+    assert result["message"] == "Added leave:\nAug 3  8h\nAug 4  8h\nAug 5  8h"
     stored = repo.get_all_leaves()
     assert {entry.date for entry in stored} == {
         date(2026, 8, 3),
@@ -441,8 +450,8 @@ def test_two_weeks_render_two_titles():
     console = Console(record=True, width=120, color_system=None)
     console.print(_format_response(result, orch))
     text = console.export_text()
-    assert "Week 2026-W32:" in text
-    assert "Week 2026-W33:" in text
+    assert "Week 2026-W32 · Aug 3–9" in text
+    assert "Week 2026-W33 · Aug 10–16" in text
 
 
 def test_plan_preview_table_keeps_long_issue_key():
@@ -519,3 +528,123 @@ def test_print_chat_banner_narrow_skips_ascii():
     assert "type /help" in text
     assert "_____" not in text
     assert "\n" not in text.strip()
+
+
+def _focus_context(message: str, state: ChatSessionState) -> ParseContext:
+    return ParseContext(
+        today=date(2026, 9, 4),
+        timezone="Asia/Makassar",
+        hours_per_day=8.0,
+        issue_keys=["SP-8412"],
+        user_message=message,
+        focus_weeks=list(state.focus_weeks),
+        focus_dates=list(state.focus_dates),
+    )
+
+
+def test_shown_week_followups_use_that_week():
+    state = ChatSessionState()
+    remember_chat_focus(
+        state,
+        {
+            "type": "week_status",
+            "week_start": date(2026, 8, 3),
+            "week_starts": [date(2026, 8, 3)],
+        },
+    )
+    assert state.focus_weeks == ["2026-W32"]
+
+    leave = parse_intent({"type": "allocate_time"}, _focus_context("mark Thursday as leave", state))
+    assert isinstance(leave, AddLeaveIntent)
+    assert leave.dates == [date(2026, 8, 6)]
+
+    again = parse_intent(
+        {"type": "clarification_required", "reason": "which week?"},
+        _focus_context("show it again", state),
+    )
+    assert isinstance(again, ShowWeekIntent)
+    assert again.weeks == ["2026-W32"]
+
+    paraphrase = parse_intent(
+        {"type": "show_week"},
+        _focus_context("that week", state),
+    )
+    assert paraphrase.weeks == ["2026-W32"]
+
+    state.clear()
+    assert state.focus_weeks == []
+    assert state.focus_dates == []
+
+
+def test_week_history_names_the_shown_week():
+    assert _history_text(
+        {
+            "type": "week_status",
+            "week_start": date(2026, 8, 3),
+            "week_starts": [date(2026, 8, 3)],
+        },
+        object(),
+    ) == "Showed 2026-W32"
+
+
+def test_missing_hours_line_precedes_the_table():
+    config = LazyTrackConfig()
+    calendar = WorkCalendar(config=config.work)
+    planner = Planner(
+        PlannerContext(
+            calendar=calendar,
+            assigned_issues=[],
+            user_worklogs=[],
+            managed_worklogs=[],
+        ),
+        config,
+    )
+    orch = ChatOrchestrator(config, calendar, [], [], planner)
+    result = orch.handle_intent(ShowWeekIntent(week="2026-W32"))
+    annotate_week_response(result, "what is missing this week")
+    console = Console(record=True, width=120, color_system=None)
+    console.print(_format_response(result, orch))
+    text = console.export_text()
+    assert "Missing 40h this week." in text
+    assert text.index("Missing 40h this week.") < text.index("Week 2026-W32")
+    assert "Note" in text
+    assert "2026-08-03" in text
+    assert "2026-08-09" in text
+
+
+def test_sync_phrase_is_not_a_clarification():
+    assert route_utterance("sync the jira now") == "sync"
+    assert route_utterance("could you refresh jira") == "sync"
+    intent = parse_intent(
+        {"type": "allocate_time", "hours": 8},
+        ParseContext(
+            today=date(2026, 9, 4),
+            timezone="Asia/Makassar",
+            hours_per_day=8.0,
+            issue_keys=["SP-8412"],
+            user_message="sync the jira now",
+        ),
+    )
+    assert intent.type == "sync"
+    assert not isinstance(intent, ClarificationRequired)
+
+
+def test_allocation_without_issue_does_not_print_missing_fields():
+    intent = parse_intent(
+        {"type": "allocate_time", "start_date": "today", "hours": 8},
+        ParseContext(
+            today=date(2026, 9, 4),
+            timezone="Asia/Makassar",
+            hours_per_day=8.0,
+            issue_keys=["SP-8412"],
+            user_message="log 8 hours tomorrow",
+        ),
+    )
+    assert isinstance(intent, ClarificationRequired)
+    assert "issue" in intent.reason.lower()
+    out = _format_response(
+        {"type": "clarification", "message": intent.reason, "missing": ["start_date", "allocations"]},
+        None,
+    )
+    assert "issue" in out.lower()
+    assert "Missing: start_date" not in out

@@ -14,9 +14,6 @@ You may help interpret requests concerning:
 - leave
 - holidays
 
-If the user asks to sync Jira, return clarification_required:
-{"type":"clarification_required","reason":"Chat can't sync. Run `lazytrack sync` in another terminal, then restart chat.","missing_fields":[]}
-
 You must never request or perform:
 - Jira issue creation
 - Jira issue deletion
@@ -27,7 +24,6 @@ You must never request or perform:
 - sprint modifications
 - project modifications
 - generic Jira API calls
-- Jira sync from chat
 
 Return only a JSON object. No markdown.
 

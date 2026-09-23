@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from typing import Any, Optional
 
@@ -44,6 +44,15 @@ class ParseContext:
     user_message: str = ""
     window_start: Optional[date] = None
     window_end: Optional[date] = None
+    focus_weeks: list[str] = field(default_factory=list)
+    focus_dates: list[date] = field(default_factory=list)
+
+
+@dataclass
+class DirectSync:
+    """Jira sync is handled by the existing sync command, not the model."""
+
+    type: str = "sync"
 
 
 def today_in_timezone(tz_name: str) -> date:
@@ -235,6 +244,604 @@ def _inclusive_dates(start: date, end: date) -> list[date]:
         days.append(d)
         d += timedelta(days=1)
     return days
+
+
+_MONTH_NUMBERS = {
+    "january": 1,
+    "jan": 1,
+    "february": 2,
+    "feb": 2,
+    "march": 3,
+    "mar": 3,
+    "april": 4,
+    "apr": 4,
+    "may": 5,
+    "june": 6,
+    "jun": 6,
+    "july": 7,
+    "jul": 7,
+    "august": 8,
+    "aug": 8,
+    "september": 9,
+    "sept": 9,
+    "sep": 9,
+    "october": 10,
+    "oct": 10,
+    "november": 11,
+    "nov": 11,
+    "december": 12,
+    "dec": 12,
+}
+_MONTH_ALT = "|".join(sorted(_MONTH_NUMBERS, key=len, reverse=True))
+_WEEKDAY_ALT = "|".join(WEEKDAYS)
+_DAY_TOKEN = r"\d{1,2}(?:st|nd|rd|th)?"
+_ISO_TOKEN = r"\d{4}-\d{2}-\d{2}"
+_MD_TOKEN = (
+    rf"(?:(?:{_MONTH_ALT})\.?\s+{_DAY_TOKEN}(?:\s*,?\s*\d{{4}})?"
+    rf"|{_DAY_TOKEN}\s+(?:{_MONTH_ALT})\.?(?:\s*,?\s*\d{{4}})?"
+    rf"|{_ISO_TOKEN})"
+)
+_RANGE_SEP = r"\s*(?:-|–|—|\bto\b|\bthrough\b|\buntil\b)\s*"
+_DATE_RANGE = re.compile(
+    rf"(?:\bfrom\s+)?(?P<a>{_MD_TOKEN}){_RANGE_SEP}(?P<b>{_MD_TOKEN})",
+    re.IGNORECASE,
+)
+_SHORT_RANGE = re.compile(
+    rf"(?:\bfrom\s+)?"
+    rf"(?:(?P<m1>{_MONTH_ALT})\.?\s+(?P<d1>{_DAY_TOKEN})\s*(?:-|–|—)\s*(?P<d2>{_DAY_TOKEN})"
+    rf"|(?P<d3>{_DAY_TOKEN})\s*(?:-|–|—)\s*(?P<d4>{_DAY_TOKEN})\s+(?P<m2>{_MONTH_ALT})\.?)"
+    rf"(?:\s*,?\s*(?P<y>\d{{4}}))?",
+    re.IGNORECASE,
+)
+_DAY_LIST_THEN_MONTH = re.compile(
+    rf"\b(?P<days>{_DAY_TOKEN}(?:\s*,\s*{_DAY_TOKEN})*)(?:\s*,)?\s+and\s+"
+    rf"(?P<last>{_DAY_TOKEN})\s+(?P<m>{_MONTH_ALT})\.?(?:\s*,?\s*(?P<y>\d{{4}}))?\b",
+    re.IGNORECASE,
+)
+_MONTH_THEN_DAY_LIST = re.compile(
+    rf"\b(?P<m>{_MONTH_ALT})\.?\s+(?P<body>{_DAY_TOKEN}"
+    rf"(?:\s*,\s*{_DAY_TOKEN})+(?:\s*(?:,\s*)?and\s+{_DAY_TOKEN})?)"
+    rf"(?:\s*,?\s*(?P<y>\d{{4}}))?\b",
+    re.IGNORECASE,
+)
+_ISO_LIST = re.compile(
+    rf"\b(?P<days>{_ISO_TOKEN}(?:\s*,\s*{_ISO_TOKEN})*)(?:\s*,)?\s+and\s+(?P<last>{_ISO_TOKEN})\b"
+    rf"|\b(?P<csv>{_ISO_TOKEN}(?:\s*,\s*{_ISO_TOKEN})+)\b",
+    re.IGNORECASE,
+)
+_ONE_DATE = re.compile(rf"\b(?P<token>{_MD_TOKEN})\b", re.IGNORECASE)
+_ISO_WEEK_TOKEN = re.compile(r"\b(?P<year>\d{4})-w(?P<week>\d{1,2})\b", re.IGNORECASE)
+_QUALIFIED_WEEKDAY = re.compile(
+    rf"\b(?:(?P<q1>this|last|next)\s+(?P<d1>{_WEEKDAY_ALT})"
+    rf"|(?P<d2>{_WEEKDAY_ALT})\s+(?P<q2>this|last|next)\s+week)\b",
+    re.IGNORECASE,
+)
+_WEEKDAY_RANGE = re.compile(
+    rf"\b(?P<a>{_WEEKDAY_ALT})\s*(?:through|to|until|-)\s*(?P<b>{_WEEKDAY_ALT})\b",
+    re.IGNORECASE,
+)
+_WEEK_WORD = re.compile(r"\b(?P<q>this|last|next)\s+week\b", re.IGNORECASE)
+_BARE_WEEKDAY = re.compile(rf"\b(?P<name>{_WEEKDAY_ALT})\b", re.IGNORECASE)
+_LONE_DAY = re.compile(rf"\b(?P<day>\d{{1,2}})(?:st|nd|rd|th)?\b", re.IGNORECASE)
+_EXPLICIT_HOURS = re.compile(r"\b(\d+(?:\.\d+)?)\s*(?:hours?|hrs?|h)\b", re.IGNORECASE)
+_ISSUE_KEY = re.compile(r"\b[A-Za-z][A-Za-z0-9]+-\d+\b")
+_ALLOCATION_WORD = re.compile(r"\b(allocate|allocation|reallocate|log)\b", re.IGNORECASE)
+_FOCUS_WEEK = re.compile(
+    r"\b(?:show it again|that week|the same week|same week)\b",
+    re.IGNORECASE,
+)
+_SHOW_WEEK_PHRASE = re.compile(
+    r"\blogged hours\b|\bhours logged\b|\bweekly status\b|"
+    r"\bshow\b(?:\s+\w+){0,6}\s+status\b|"
+    r"\bstatus\b(?:\s+\w+){0,6}\s+week\b|"
+    r"\b(?:show|check)\b(?:\s+\w+){0,4}\s+week\b",
+    re.IGNORECASE,
+)
+_MISSING_HOURS = re.compile(
+    r"\bmissing hours\b|\bwhat(?:'s| is) missing\b|"
+    r"\bhow many hours\b.*\bmissing\b|\bmissing\b.*\bhours\b",
+    re.IGNORECASE,
+)
+_SHOW_VERB = re.compile(r"\b(show|check|display|view)\b", re.IGNORECASE)
+
+
+@dataclass
+class DateSpans:
+    dates: list[date] = field(default_factory=list)
+    weeks: list[str] = field(default_factory=list)
+    clarification: Optional[str] = None
+
+
+def _week_start(d: date) -> date:
+    return d - timedelta(days=d.weekday())
+
+
+def _date_from_iso_week(week_id: str) -> Optional[date]:
+    match = re.fullmatch(r"(\d{4})-W(\d{2})", week_id.strip())
+    if not match:
+        return None
+    try:
+        return date.fromisocalendar(int(match.group(1)), int(match.group(2)), 1)
+    except ValueError:
+        return None
+
+
+def _focused_week_starts(focus_weeks: list[str], focus_dates: list[date]) -> list[date]:
+    starts: list[date] = []
+    for week_id in focus_weeks:
+        start = _date_from_iso_week(week_id)
+        if start and start not in starts:
+            starts.append(start)
+    if not starts:
+        for day in focus_dates:
+            start = _week_start(day)
+            if start not in starts:
+                starts.append(start)
+    return starts
+
+
+def _year_for_month(
+    month: int,
+    today: date,
+    focus_weeks: list[str],
+    focus_dates: list[date],
+) -> int:
+    for day in reversed(focus_dates):
+        if day.month == month:
+            return day.year
+    for start in reversed(_focused_week_starts(focus_weeks, [])):
+        for offset in range(7):
+            day = start + timedelta(days=offset)
+            if day.month == month:
+                return day.year
+    return today.year
+
+
+def _safe_date(year: int, month: int, day: int) -> Optional[date]:
+    try:
+        return date(year, month, day)
+    except ValueError:
+        return None
+
+
+def _day_number(token: str) -> Optional[int]:
+    match = re.match(r"(\d{1,2})", token)
+    if not match:
+        return None
+    day = int(match.group(1))
+    if 1 <= day <= 31:
+        return day
+    return None
+
+
+def _parse_month_day_token(
+    token: str,
+    today: date,
+    focus_weeks: list[str],
+    focus_dates: list[date],
+) -> Optional[date]:
+    text = token.strip().lower().replace(".", "")
+    if re.fullmatch(_ISO_TOKEN, text):
+        try:
+            return date.fromisoformat(text)
+        except ValueError:
+            return None
+    month_first = re.fullmatch(
+        rf"({_MONTH_ALT})\s+(\d{{1,2}})(?:st|nd|rd|th)?(?:\s*,?\s*(\d{{4}}))?",
+        text,
+    )
+    if month_first:
+        month = _MONTH_NUMBERS[month_first.group(1)]
+        day = int(month_first.group(2))
+        year = (
+            int(month_first.group(3))
+            if month_first.group(3)
+            else _year_for_month(month, today, focus_weeks, focus_dates)
+        )
+        return _safe_date(year, month, day)
+    day_first = re.fullmatch(
+        rf"(\d{{1,2}})(?:st|nd|rd|th)?\s+({_MONTH_ALT})(?:\s*,?\s*(\d{{4}}))?",
+        text,
+    )
+    if day_first:
+        day = int(day_first.group(1))
+        month = _MONTH_NUMBERS[day_first.group(2)]
+        year = (
+            int(day_first.group(3))
+            if day_first.group(3)
+            else _year_for_month(month, today, focus_weeks, focus_dates)
+        )
+        return _safe_date(year, month, day)
+    return None
+
+
+def _overlaps(claimed: list[tuple[int, int]], start: int, end: int) -> bool:
+    return any(start < right and end > left for left, right in claimed)
+
+
+def _claim(claimed: list[tuple[int, int]], start: int, end: int) -> bool:
+    if _overlaps(claimed, start, end):
+        return False
+    claimed.append((start, end))
+    return True
+
+
+class _SpanBuilder:
+    def __init__(self) -> None:
+        self.dates: list[date] = []
+        self.weeks: list[str] = []
+
+    def add(self, start: date, end: date) -> None:
+        if end < start:
+            start, end = end, start
+        for day in _inclusive_dates(start, end):
+            if day not in self.dates:
+                self.dates.append(day)
+        for week_id in _weeks_covering(start, end):
+            if week_id not in self.weeks:
+                self.weeks.append(week_id)
+
+
+def _append_days(
+    builder: _SpanBuilder,
+    days: list[date],
+) -> None:
+    for day in days:
+        builder.add(day, day)
+
+
+def extract_date_spans(
+    text: str,
+    today: date,
+    focus_weeks: Optional[list[str]] = None,
+    focus_dates: Optional[list[date]] = None,
+) -> DateSpans:
+    """Find explicit date spans. Does not fuzzy-parse the whole sentence."""
+    focus_weeks = list(focus_weeks or [])
+    focus_dates = list(focus_dates or [])
+    if not text or not text.strip():
+        return DateSpans()
+
+    lowered = text.lower()
+    claimed: list[tuple[int, int]] = []
+    builder = _SpanBuilder()
+
+    def take_range(start: date, end: date, left: int, right: int) -> None:
+        if _claim(claimed, left, right):
+            builder.add(start, end)
+
+    for match in _ISO_WEEK_TOKEN.finditer(lowered):
+        if not _claim(claimed, match.start(), match.end()):
+            continue
+        week_id = f"{match.group('year')}-W{int(match.group('week')):02d}"
+        start = _date_from_iso_week(week_id)
+        if start:
+            builder.add(start, start + timedelta(days=6))
+
+    for match in _DATE_RANGE.finditer(lowered):
+        start = _parse_month_day_token(match.group("a"), today, focus_weeks, focus_dates)
+        end = _parse_month_day_token(match.group("b"), today, focus_weeks, focus_dates)
+        if start and end:
+            take_range(start, end, match.start(), match.end())
+
+    for match in _SHORT_RANGE.finditer(lowered):
+        if _overlaps(claimed, match.start(), match.end()):
+            continue
+        if match.group("m1"):
+            month = _MONTH_NUMBERS[match.group("m1").lower()]
+            first = _day_number(match.group("d1"))
+            second = _day_number(match.group("d2"))
+        else:
+            month = _MONTH_NUMBERS[match.group("m2").lower()]
+            first = _day_number(match.group("d3"))
+            second = _day_number(match.group("d4"))
+        if first is None or second is None:
+            continue
+        year = (
+            int(match.group("y"))
+            if match.group("y")
+            else _year_for_month(month, today, focus_weeks, focus_dates)
+        )
+        start = _safe_date(year, month, first)
+        end = _safe_date(year, month, second)
+        if start and end:
+            take_range(start, end, match.start(), match.end())
+
+    for match in _DAY_LIST_THEN_MONTH.finditer(lowered):
+        if _overlaps(claimed, match.start(), match.end()):
+            continue
+        month = _MONTH_NUMBERS[match.group("m").lower()]
+        year = (
+            int(match.group("y"))
+            if match.group("y")
+            else _year_for_month(month, today, focus_weeks, focus_dates)
+        )
+        numbers = [
+            n
+            for n in (
+                _day_number(piece)
+                for piece in re.findall(_DAY_TOKEN, match.group("days"), re.IGNORECASE)
+            )
+            if n is not None
+        ]
+        last = _day_number(match.group("last"))
+        if last is not None:
+            numbers.append(last)
+        days = [day for n in numbers if (day := _safe_date(year, month, n))]
+        if days and _claim(claimed, match.start(), match.end()):
+            _append_days(builder, days)
+
+    for match in _MONTH_THEN_DAY_LIST.finditer(lowered):
+        if _overlaps(claimed, match.start(), match.end()):
+            continue
+        month = _MONTH_NUMBERS[match.group("m").lower()]
+        year = (
+            int(match.group("y"))
+            if match.group("y")
+            else _year_for_month(month, today, focus_weeks, focus_dates)
+        )
+        numbers = [
+            n
+            for n in (
+                _day_number(piece)
+                for piece in re.findall(_DAY_TOKEN, match.group("body"), re.IGNORECASE)
+            )
+            if n is not None
+        ]
+        days = [day for n in numbers if (day := _safe_date(year, month, n))]
+        if days and _claim(claimed, match.start(), match.end()):
+            _append_days(builder, days)
+
+    for match in _ISO_LIST.finditer(lowered):
+        if _overlaps(claimed, match.start(), match.end()):
+            continue
+        blob = " ".join(part for part in (match.group("days"), match.group("last"), match.group("csv")) if part)
+        days = []
+        for token in re.findall(_ISO_TOKEN, blob):
+            try:
+                parsed = date.fromisoformat(token)
+            except ValueError:
+                continue
+            if parsed not in days:
+                days.append(parsed)
+        if days and _claim(claimed, match.start(), match.end()):
+            _append_days(builder, days)
+
+    for match in _ONE_DATE.finditer(lowered):
+        if _overlaps(claimed, match.start(), match.end()):
+            continue
+        parsed = _parse_month_day_token(match.group("token"), today, focus_weeks, focus_dates)
+        if parsed and _claim(claimed, match.start(), match.end()):
+            builder.add(parsed, parsed)
+
+    for match in _QUALIFIED_WEEKDAY.finditer(lowered):
+        if _overlaps(claimed, match.start(), match.end()):
+            continue
+        parsed = _parse_date_value(match.group(0), today)
+        if parsed and _claim(claimed, match.start(), match.end()):
+            builder.add(parsed, parsed)
+
+    for match in _WEEKDAY_RANGE.finditer(lowered):
+        if _overlaps(claimed, match.start(), match.end()):
+            continue
+        start_idx = WEEKDAYS[match.group("a").lower()]
+        end_idx = WEEKDAYS[match.group("b").lower()]
+        if end_idx < start_idx:
+            continue
+        week_starts = _focused_week_starts(focus_weeks, focus_dates)
+        if len(week_starts) > 1:
+            if not builder.dates and not builder.weeks:
+                return DateSpans(clarification="Which week should I use?")
+            continue
+        anchor = week_starts[0] if week_starts else _week_start(today)
+        if _claim(claimed, match.start(), match.end()):
+            builder.add(anchor + timedelta(days=start_idx), anchor + timedelta(days=end_idx))
+
+    if builder.dates or builder.weeks:
+        return DateSpans(dates=builder.dates, weeks=builder.weeks)
+
+    for match in _WEEK_WORD.finditer(lowered):
+        if not _claim(claimed, match.start(), match.end()):
+            continue
+        anchor = _week_start(today) + timedelta(weeks=WEEK_OFFSETS[match.group("q").lower()])
+        builder.add(anchor, anchor + timedelta(days=6))
+
+    if not builder.dates:
+        week_starts = _focused_week_starts(focus_weeks, focus_dates)
+        bare_matches = [
+            match
+            for match in _BARE_WEEKDAY.finditer(lowered)
+            if not _overlaps(claimed, match.start(), match.end())
+        ]
+        if bare_matches:
+            if len(week_starts) > 1:
+                return DateSpans(clarification="Which week should I use?")
+            anchor = week_starts[0] if week_starts else _week_start(today)
+            for match in bare_matches:
+                if _claim(claimed, match.start(), match.end()):
+                    day = anchor + timedelta(days=WEEKDAYS[match.group("name").lower()])
+                    builder.add(day, day)
+
+    if builder.dates or builder.weeks:
+        return DateSpans(dates=builder.dates, weeks=builder.weeks)
+
+    lone_days: list[int] = []
+    for match in _LONE_DAY.finditer(lowered):
+        if _overlaps(claimed, match.start(), match.end()):
+            continue
+        after = lowered[match.end() : match.end() + 16]
+        if re.match(r"\s*(?::|hours?\b|hrs?\b|h\b)", after):
+            continue
+        if re.search(r"\bweek\s+$", lowered[: match.start()]):
+            continue
+        number = int(match.group("day"))
+        if 1 <= number <= 31:
+            lone_days.append(number)
+    if lone_days:
+        week_starts = _focused_week_starts(focus_weeks, focus_dates)
+        if not week_starts:
+            return DateSpans(clarification="Which month should I use?")
+        resolved: list[date] = []
+        for number in lone_days:
+            hits = []
+            for start in week_starts:
+                for offset in range(7):
+                    day = start + timedelta(days=offset)
+                    if day.day == number:
+                        hits.append(day)
+            if len(hits) != 1:
+                return DateSpans(clarification="Which month should I use?")
+            resolved.append(hits[0])
+        _append_days(builder, resolved)
+
+    return DateSpans(dates=builder.dates, weeks=builder.weeks)
+
+
+def asks_missing_hours(text: str) -> bool:
+    return bool(_MISSING_HOURS.search(text or ""))
+
+
+def refers_to_focused_week(text: str) -> bool:
+    return bool(_FOCUS_WEEK.search(text or ""))
+
+
+def route_utterance(text: str) -> Optional[str]:
+    """Return a deterministic route, or None when the model should decide."""
+    if not text or not text.strip():
+        return None
+    if re.search(r"\b(sync|refresh|update)\b", text, re.IGNORECASE) and re.search(
+        r"\bjira\b", text, re.IGNORECASE
+    ):
+        return "sync"
+    if re.search(r"\bleave\b", text, re.IGNORECASE) and re.search(
+        r"\b(remove|undo|unrevert|delete|clear)\b|\btake (?:it |the leave )?off\b",
+        text,
+        re.IGNORECASE,
+    ):
+        return "remove_leave"
+    if re.search(r"\bleave\b", text, re.IGNORECASE):
+        return "add_leave"
+    if re.search(r"\bholiday\b", text, re.IGNORECASE) and re.search(
+        r"\b(remove|undo|unrevert|delete|clear)\b",
+        text,
+        re.IGNORECASE,
+    ):
+        return "remove_holiday"
+    if re.search(r"\bholiday\b", text, re.IGNORECASE):
+        return "add_holiday"
+    if _ISSUE_KEY.search(text) or _ALLOCATION_WORD.search(text):
+        return None
+    if refers_to_focused_week(text) or _SHOW_WEEK_PHRASE.search(text) or asks_missing_hours(text):
+        return "show_week"
+    if _SHOW_VERB.search(text):
+        spans = extract_date_spans(text, date.today())
+        if spans.dates or spans.weeks:
+            return "show_week"
+    return None
+
+
+def _explicit_hours(text: str) -> Optional[float]:
+    match = _EXPLICIT_HOURS.search(text or "")
+    if not match:
+        return None
+    return float(match.group(1))
+
+
+def _retarget_intent(data: dict[str, Any], route: str, text: str) -> None:
+    data["type"] = route
+    if route == "add_leave":
+        for key in ("allocations", "worklogs", "issue_key", "week", "weeks", "gaps", "total_hours"):
+            data.pop(key, None)
+        hours = _explicit_hours(text)
+        if hours is None:
+            data.pop("hours", None)
+            data.pop("hours_per_day", None)
+        else:
+            data["hours"] = hours
+    elif route in ("remove_leave", "add_holiday", "remove_holiday"):
+        for key in ("allocations", "worklogs", "issue_key", "week", "weeks", "gaps"):
+            data.pop(key, None)
+    elif route == "show_week":
+        for key in ("allocations", "worklogs", "issue_key", "dates", "date", "hours", "hours_per_day"):
+            data.pop(key, None)
+
+
+def _apply_focus(data: dict[str, Any], ctx: ParseContext, show: bool, calendar: bool):
+    weeks = list(ctx.focus_weeks)
+    if not weeks and ctx.focus_dates:
+        for day in ctx.focus_dates:
+            week_id = _iso_week_id(day)
+            if week_id not in weeks:
+                weeks.append(week_id)
+    dates = list(ctx.focus_dates)
+    if not dates:
+        for week_id in weeks:
+            start = _date_from_iso_week(week_id)
+            if start:
+                dates.extend(start + timedelta(days=offset) for offset in range(7))
+    if show:
+        if not weeks:
+            return ClarificationRequired(
+                reason="Which week should I show?",
+                missing_fields=["week"],
+            )
+        data["weeks"] = weeks
+        data["week"] = weeks[0]
+        data.pop("start_date", None)
+        data.pop("end_date", None)
+        return None
+    if calendar:
+        if not dates:
+            return ClarificationRequired(
+                reason="Which dates should I use?",
+                missing_fields=["date"],
+            )
+        data["dates"] = [day.isoformat() for day in dates]
+        data["date"] = dates[0].isoformat()
+        data.pop("start_date", None)
+        data.pop("end_date", None)
+    return None
+
+
+def _merge_spans(data: dict[str, Any], ctx: ParseContext):
+    text = ctx.user_message or ""
+    if not text.strip():
+        return None
+    intent_type = str(data.get("type", "")).lower().replace(" ", "_")
+    calendar = intent_type in _CALENDAR_TYPES
+    show = intent_type in ("show_week", "showweekintent")
+    if not calendar and not show:
+        return None
+    spans = extract_date_spans(text, ctx.today, ctx.focus_weeks, ctx.focus_dates)
+    if spans.dates or spans.weeks:
+        if show and spans.weeks:
+            data["weeks"] = list(spans.weeks)
+            data["week"] = spans.weeks[0]
+            data.pop("start_date", None)
+            data.pop("end_date", None)
+        if calendar and spans.dates:
+            data["dates"] = [day.isoformat() for day in spans.dates]
+            data["date"] = spans.dates[0].isoformat()
+            data.pop("start_date", None)
+            data.pop("end_date", None)
+        return None
+    if refers_to_focused_week(text):
+        return _apply_focus(data, ctx, show, calendar)
+    if spans.clarification:
+        missing = ["date"] if calendar else ["week"]
+        return ClarificationRequired(reason=spans.clarification, missing_fields=missing)
+    return None
+
+
+def _prepare_intent_data(data: dict[str, Any], ctx: ParseContext):
+    prepared = dict(data)
+    route = route_utterance(ctx.user_message)
+    if route and route != "sync":
+        _retarget_intent(prepared, route, ctx.user_message)
+    problem = _merge_spans(prepared, ctx)
+    if problem is not None:
+        return problem
+    return prepared
 
 
 _CALENDAR_TYPES = {
@@ -481,6 +1088,14 @@ def parse_intent(raw: str | dict[str, Any], ctx: ParseContext):
     else:
         data = dict(raw)
 
+    if route_utterance(ctx.user_message) == "sync":
+        return DirectSync()
+
+    prepared = _prepare_intent_data(data, ctx)
+    if isinstance(prepared, ClarificationRequired):
+        return prepared
+    data = prepared
+
     intent_type = str(data.get("type", "")).lower().replace(" ", "_")
     known = {
         "allocate_time",
@@ -508,14 +1123,6 @@ def parse_intent(raw: str | dict[str, Any], ctx: ParseContext):
         "clarificationrequired",
     }
     if intent_type and intent_type not in known:
-        if "sync" in intent_type:
-            return ClarificationRequired(
-                reason=(
-                    "Chat can't sync. Run `lazytrack sync` in another terminal, "
-                    "then restart chat."
-                ),
-                missing_fields=[],
-            )
         return ClarificationRequired(
             reason=(
                 "Sorry, I can't do that. LazyTrack only handles assigned issues, "
@@ -570,8 +1177,17 @@ def parse_intent(raw: str | dict[str, Any], ctx: ParseContext):
                 missing_fields=["date", "hours"],
             )
         if not normalized.get("worklogs") and not normalized.get("allocations"):
+            has_hours = any(
+                _as_float(normalized.get(key)) is not None
+                for key in ("hours", "hours_per_day", "total_hours")
+            )
+            if has_hours:
+                return ClarificationRequired(
+                    reason="Which issue should I log those hours on?",
+                    missing_fields=["issue_key"],
+                )
             return ClarificationRequired(
-                reason="Which issue and duration should I log?",
+                reason="Which issue and how many hours should I log?",
                 missing_fields=["issue_key", "hours"],
             )
     try:
@@ -598,9 +1214,6 @@ def parse_intent(raw: str | dict[str, Any], ctx: ParseContext):
                 missing_fields=["date"],
             )
         return ClarificationRequired(
-            reason=(
-                "Sorry, I need a bit more detail. For allocation I need an issue key, "
-                "hours, and a date (today or YYYY-MM-DD)."
-            ),
-            missing_fields=["start_date", "allocations"],
+            reason="Which issue, hours, and date should I use?",
+            missing_fields=["issue_key", "hours", "date"],
         )

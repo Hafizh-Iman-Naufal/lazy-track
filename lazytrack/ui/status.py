@@ -10,6 +10,33 @@ from lazytrack.domain.calendar import WorkCalendar
 from lazytrack.domain.duration import format_hours
 
 _ISO_WEEK = re.compile(r"^(\d{4})-W(\d{2})$")
+_MONTH_ABBR = (
+    "Jan",
+    "Feb",
+    "Mar",
+    "Apr",
+    "May",
+    "Jun",
+    "Jul",
+    "Aug",
+    "Sep",
+    "Oct",
+    "Nov",
+    "Dec",
+)
+
+
+def format_month_day(d: date) -> str:
+    return f"{_MONTH_ABBR[d.month - 1]} {d.day}"
+
+
+def week_title(week_start: date) -> str:
+    week_end = week_start + timedelta(days=6)
+    if week_start.month == week_end.month and week_start.year == week_end.year:
+        span = f"{format_month_day(week_start)}–{week_end.day}"
+    else:
+        span = f"{format_month_day(week_start)}–{format_month_day(week_end)}"
+    return f"Week {iso_week_id(week_start)} · {span}"
 
 
 def _day_note(calendar: WorkCalendar, d: date) -> str:
@@ -42,16 +69,13 @@ def week_status_renderable(
     calendar: WorkCalendar,
     logged_by_date: dict[date, Decimal],
 ) -> Group:
-    week_end = week_start + timedelta(days=6)
     weekly = calendar.required_hours_for_week(week_start)
     total_logged = sum(
         (logged_by_date.get(week_start + timedelta(days=i), Decimal("0")) for i in range(7)),
         Decimal("0"),
     )
 
-    table = Table(
-        title=f"Week {iso_week_id(week_start)}: {week_start} - {week_end}"
-    )
+    table = Table(title=week_title(week_start))
     table.add_column("Day", style="cyan")
     table.add_column("Date", style="white")
     table.add_column("Expected", style="yellow")

@@ -40,7 +40,7 @@ def _recorded_status(monkeypatch, status_db, week):
 
 def test_cli_status_selected_week(monkeypatch, status_db):
     text = _recorded_status(monkeypatch, status_db, "2026-W36")
-    assert "Week 2026-W36: 2026-08-31 - 2026-09-06" in text
+    assert "Week 2026-W36 · Aug 31–Sep 6" in text
     assert "8h 30m" in text
     assert "Logged:    8h 30m" in text
 
@@ -48,7 +48,7 @@ def test_cli_status_selected_week(monkeypatch, status_db):
 def test_cli_status_default_week_uses_configured_timezone(monkeypatch, status_db):
     monkeypatch.setattr(cli, "today_in_timezone", lambda timezone: date(2026, 9, 6))
     text = _recorded_status(monkeypatch, status_db, None)
-    assert "Week 2026-W36: 2026-08-31 - 2026-09-06" in text
+    assert "Week 2026-W36 · Aug 31–Sep 6" in text
 
 
 def test_cli_status_rejects_invalid_week(monkeypatch, status_db):

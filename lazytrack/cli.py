@@ -16,7 +16,13 @@ from rich.text import Text
 from lazytrack import __version__
 from lazytrack.ai.base import AIError, AIAuthenticationError, AIRateLimitError, AITimeoutError
 from lazytrack.ai.generate import generate_structured_intent
-from lazytrack.ai.normalize import ParseContext, today_in_timezone, timezone_from_text
+from lazytrack.ai.normalize import (
+    ParseContext,
+    parse_intent,
+    route_utterance,
+    today_in_timezone,
+    timezone_from_text,
+)
 from lazytrack.ai.prompts import build_intent_prompt
 from lazytrack.ai.providers.gemini import GeminiProvider
 from lazytrack.ai.providers.deepseek import DeepSeekProvider
@@ -43,6 +49,7 @@ from lazytrack.ui.chat import (
     CHAT_HELP,
     ChatSessionState,
     ChatOrchestrator,
+    annotate_week_response,
     bind_pending_from_response,
     chat_completer,
     chat_history_path,
@@ -52,9 +59,10 @@ from lazytrack.ui.chat import (
     effective_user_input,
     parse_chat_command,
     parse_status_week,
+    remember_chat_focus,
 )
 from lazytrack.ui.issues import issues_table
-from lazytrack.ui.status import parse_iso_week, week_status_renderable
+from lazytrack.ui.status import iso_week_id, parse_iso_week, week_status_renderable
 from lazytrack.storage import get_db, CalendarRepository, WorklogCacheRepository
 from lazytrack.domain.window import cache_window
 
@@ -174,6 +182,106 @@ def config_show():
         raise typer.Exit(1)
 
 
+def run_jira_sync(
+    conn,
+    *,
+    config,
+    gateway,
+    verbose: bool = False,
+    include_done: bool = False,
+    sync_worklogs: bool = True,
+) -> None:
+    """Write Jira issues and worklogs into an open cache connection.
+
+    Prints the same success line as the CLI. Does not open or close the database.
+    """
+    use_done = include_done or config.jira.include_done
+    project = config.jira.project or None
+
+    async def do_sync():
+        user = await gateway.get_current_user()
+        if verbose:
+            console.print(f"[dim]Logged in as:[/dim] [cyan]{user.get('displayName', '?')} ({user.get('accountId', '?')})[/cyan]")
+        issues = await gateway.search_assigned_issues(project, use_done)
+        return issues
+
+    issues = asyncio.run(do_sync())
+
+    if verbose:
+        from lazytrack.jira.issues import build_assigned_issues_jql
+        jql = build_assigned_issues_jql(project, use_done)
+        console.print(f"[dim]JQL:[/dim] [cyan]{jql}[/cyan]")
+        console.print(f"[dim]Found:[/dim] [cyan]{len(issues)}[/cyan] issues")
+        if not issues and not use_done:
+            console.print("[dim]Hint: try -d to include Done status issues[/dim]")
+        for issue in issues[:10]:
+            console.print(f"  {issue.key} [{issue.status}] {issue.summary}")
+        if len(issues) > 10:
+            console.print(f"  [dim]... and {len(issues) - 10} more[/dim]")
+
+    for issue in issues:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO issues_cache 
+            (key, summary, issue_type, status, project_key, assignee)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                issue.key,
+                issue.summary,
+                issue.issue_type,
+                issue.status,
+                issue.project_key,
+                "current_user" if issue.assignee_is_current_user else None,
+            ),
+        )
+
+    conn.commit()
+
+    worklog_count = 0
+    if sync_worklogs:
+        start_date, end_date = cache_window(
+            date.today(), config.safety.worklog_lookback_weeks
+        )
+
+        if verbose:
+            console.print(f"[dim]Syncing worklogs from {start_date} to {end_date}...[/dim]")
+
+        async def do_sync_worklogs():
+            return await gateway.get_worklogs_for_user(
+                start_date, end_date, timezone=config.work.timezone
+            )
+
+        worklogs = asyncio.run(do_sync_worklogs())
+        worklog_count = WorklogCacheRepository(conn).replace_window(
+            worklogs, start_date, end_date
+        )
+
+        if verbose:
+            console.print(
+                f"[dim]Refreshed:[/dim] [cyan]{worklog_count}[/cyan] "
+                f"worklogs ({start_date} → {end_date})"
+            )
+
+    parts = [f"[green]Synced {len(issues)} issues[/green]"]
+    if sync_worklogs:
+        parts.append(f"[green]{worklog_count} worklogs[/green]")
+    console.print(" + ".join(parts))
+
+
+def _print_sync_error(exc: Exception) -> None:
+    if isinstance(exc, JiraAuthenticationError):
+        console.print("[red]Authentication failed. Check JIRA_EMAIL and JIRA_API_TOKEN[/red]")
+    elif isinstance(exc, JiraRateLimitError):
+        console.print("[red]Rate limited by Jira. Wait and try again.[/red]")
+    elif isinstance(exc, JiraTimeoutError):
+        console.print("[red]Request timed out. Check network and try again.[/red]")
+    elif isinstance(exc, JiraServerError):
+        console.print(f"[red]Jira server error: {exc}[/red]")
+    else:
+        console.print(f"[red]Sync failed: {exc}[/red]")
+
+
 @cli.command()
 def sync(
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Print JQL and raw results"),
@@ -186,99 +294,21 @@ def sync(
     try:
         config = load_config()
         gateway = get_jira_gateway()
-
-        use_done = include_done or config.jira.include_done
-        project = config.jira.project or None
-
-        async def do_sync():
-            user = await gateway.get_current_user()
-            if verbose:
-                console.print(f"[dim]Logged in as:[/dim] [cyan]{user.get('displayName', '?')} ({user.get('accountId', '?')})[/cyan]")
-            issues = await gateway.search_assigned_issues(project, use_done)
-            return issues
-
-        issues = asyncio.run(do_sync())
-
-        if verbose:
-            from lazytrack.jira.issues import build_assigned_issues_jql
-            jql = build_assigned_issues_jql(project, use_done)
-            console.print(f"[dim]JQL:[/dim] [cyan]{jql}[/cyan]")
-            console.print(f"[dim]Found:[/dim] [cyan]{len(issues)}[/cyan] issues")
-            if not issues and not use_done:
-                console.print("[dim]Hint: try -d to include Done status issues[/dim]")
-            for issue in issues[:10]:
-                console.print(f"  {issue.key} [{issue.status}] {issue.summary}")
-            if len(issues) > 10:
-                console.print(f"  [dim]... and {len(issues) - 10} more[/dim]")
-
         db = get_db()
         conn = db.connect()
-
-        for issue in issues:
-            conn.execute(
-                """
-                INSERT OR REPLACE INTO issues_cache 
-                (key, summary, issue_type, status, project_key, assignee)
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    issue.key,
-                    issue.summary,
-                    issue.issue_type,
-                    issue.status,
-                    issue.project_key,
-                    "current_user" if issue.assignee_is_current_user else None,
-                ),
+        try:
+            run_jira_sync(
+                conn,
+                config=config,
+                gateway=gateway,
+                verbose=verbose,
+                include_done=include_done,
+                sync_worklogs=sync_worklogs,
             )
-
-        conn.commit()
-
-        worklog_count = 0
-        if sync_worklogs:
-            start_date, end_date = cache_window(
-                date.today(), config.safety.worklog_lookback_weeks
-            )
-
-            if verbose:
-                console.print(f"[dim]Syncing worklogs from {start_date} to {end_date}...[/dim]")
-
-            async def do_sync_worklogs():
-                return await gateway.get_worklogs_for_user(
-                    start_date, end_date, timezone=config.work.timezone
-                )
-
-            worklogs = asyncio.run(do_sync_worklogs())
-            worklog_count = WorklogCacheRepository(conn).replace_window(
-                worklogs, start_date, end_date
-            )
-
-            if verbose:
-                console.print(
-                    f"[dim]Refreshed:[/dim] [cyan]{worklog_count}[/cyan] "
-                    f"worklogs ({start_date} → {end_date})"
-                )
-
-        db.close()
-
-        parts = [f"[green]Synced {len(issues)} issues[/green]"]
-        if sync_worklogs:
-            parts.append(f"[green]{worklog_count} worklogs[/green]")
-        console.print(" + ".join(parts))
-
-    except JiraAuthenticationError:
-        console.print("[red]Authentication failed. Check JIRA_EMAIL and JIRA_API_TOKEN[/red]")
-        raise typer.Exit(1)
-    except JiraRateLimitError:
-        console.print("[red]Rate limited by Jira. Wait and try again.[/red]")
-        raise typer.Exit(1)
-    except JiraTimeoutError:
-        console.print("[red]Request timed out. Check network and try again.[/red]")
-        raise typer.Exit(1)
-    except JiraServerError as e:
-        console.print(f"[red]Jira server error: {e}[/red]")
-        raise typer.Exit(1)
-    except Exception as e:
-        console.print(f"[red]Sync failed: {e}[/red]")
+        finally:
+            db.close()
+    except Exception as exc:
+        _print_sync_error(exc)
         raise typer.Exit(1)
 
 
@@ -731,6 +761,21 @@ def _plan_preview_renderable(plan, timezone: str) -> Group:
     lines.append("Reply yes to apply, no to cancel, or describe a correction.")
     return Group(table, Text("\n".join(lines)))
 
+def _history_text(response: dict, output: object) -> str:
+    if response.get("type") == "week_status":
+        starts = response.get("week_starts") or [response.get("week_start")]
+        labels = [iso_week_id(start) for start in starts if isinstance(start, date)]
+        if labels:
+            return "Showed " + ", ".join(labels)
+    preview = response.get("preview")
+    if isinstance(output, str):
+        return output[:500]
+    if response.get("type") == "plan_preview" and isinstance(preview, str):
+        return preview[:500]
+    n = len(response.get("issues") or [])
+    return f"{n} issues" if n else "Assigned Issues"
+
+
 def _format_response(response: dict, orchestrator: ChatOrchestrator) -> object:
     rtype = response.get("type")
     msg = response.get("message", "")
@@ -742,9 +787,6 @@ def _format_response(response: dict, orchestrator: ChatOrchestrator) -> object:
     elif rtype == "info":
         return f"[yellow]{msg}[/yellow]"
     elif rtype == "clarification":
-        missing = [item for item in (response.get("missing") or []) if item]
-        if missing:
-            return f"[yellow]{msg}[/yellow]\nMissing: {', '.join(missing)}"
         return f"[yellow]{msg}[/yellow]"
     elif rtype == "plan_preview":
         plan = response.get("plan")
@@ -767,9 +809,11 @@ def _format_response(response: dict, orchestrator: ChatOrchestrator) -> object:
             week_status_renderable(start, orchestrator.calendar, logged)
             for start, logged in zip(starts, logged_weeks)
         ]
-        if len(tables) == 1:
-            return tables[0]
-        return Group(*tables)
+        body = tables[0] if len(tables) == 1 else Group(*tables)
+        if response.get("show_missing"):
+            missing = response.get("missing") or Decimal("0")
+            return Group(Text(f"Missing {format_hours(missing)} this week."), body)
+        return body
     elif rtype == "issues_list":
         issues = response.get("issues", [])
         if not issues:
@@ -779,6 +823,59 @@ def _format_response(response: dict, orchestrator: ChatOrchestrator) -> object:
         return issues_table(issues, base_url)
     else:
         return msg or str(response)
+
+def _issues_from_cache(conn):
+    from lazytrack.jira.models import IssueSummary
+
+    cursor = conn.execute(
+        "SELECT key, summary, issue_type, status, project_key FROM issues_cache"
+    )
+    issues = []
+    for row in cursor.fetchall():
+        issues.append(IssueSummary(
+            key=row["key"], summary=row["summary"], issue_type=row["issue_type"],
+            status=row["status"], project_key=row["project_key"],
+            assignee_is_current_user=True,
+        ))
+    return issues
+
+
+def _worklogs_from_cache(conn):
+    from lazytrack.jira.models import WorklogEntry
+
+    cursor = conn.execute(
+        "SELECT id, issue_key, work_date, seconds, author FROM worklog_cache "
+        "WHERE author = 'current_user'"
+    )
+    worklogs = []
+    for row in cursor.fetchall():
+        worklogs.append(WorklogEntry(
+            id=str(row["id"]), issue_key=row["issue_key"],
+            work_date=date.fromisoformat(row["work_date"]), seconds=row["seconds"],
+            author_is_current_user=True, managed_by_lazytrack=bool(row["author"]),
+        ))
+    return worklogs
+
+
+def _install_chat_cache(orchestrator: ChatOrchestrator, conn) -> None:
+    issues = _issues_from_cache(conn)
+    worklogs = _worklogs_from_cache(conn)
+    orchestrator.issues = issues
+    orchestrator.worklogs = worklogs
+    orchestrator.planner.context.assigned_issues = issues
+    orchestrator.planner.context.user_worklogs = worklogs
+
+
+def _run_chat_sync(conn, config, orchestrator: ChatOrchestrator) -> None:
+    console.print("[yellow]Syncing with Jira...[/yellow]")
+    try:
+        gateway = get_jira_gateway()
+        run_jira_sync(conn, config=config, gateway=gateway)
+    except Exception as exc:
+        _print_sync_error(exc)
+        return
+    _install_chat_cache(orchestrator, conn)
+
 
 @cli.command()
 def chat(debug: bool = typer.Option(False, "--debug", "-d", help="Enable debug logging")):
@@ -809,26 +906,8 @@ def chat(debug: bool = typer.Option(False, "--debug", "-d", help="Enable debug l
 
     db = get_db()
     conn = db.connect()
-
-    cursor = conn.execute("SELECT key, summary, issue_type, status, project_key FROM issues_cache")
-    issues = []
-    for row in cursor.fetchall():
-        from lazytrack.jira.models import IssueSummary
-        issues.append(IssueSummary(
-            key=row["key"], summary=row["summary"], issue_type=row["issue_type"],
-            status=row["status"], project_key=row["project_key"],
-            assignee_is_current_user=True,
-        ))
-
-    cursor = conn.execute("SELECT id, issue_key, work_date, seconds, author FROM worklog_cache WHERE author = 'current_user'")
-    worklogs = []
-    for row in cursor.fetchall():
-        from lazytrack.jira.models import WorklogEntry
-        worklogs.append(WorklogEntry(
-            id=str(row["id"]), issue_key=row["issue_key"],
-            work_date=date.fromisoformat(row["work_date"]), seconds=row["seconds"],
-            author_is_current_user=True, managed_by_lazytrack=bool(row["author"]),
-        ))
+    issues = _issues_from_cache(conn)
+    worklogs = _worklogs_from_cache(conn)
 
     from lazytrack.storage import CalendarRepository
     calendar_repo = CalendarRepository(conn)
@@ -911,11 +990,13 @@ def chat(debug: bool = typer.Option(False, "--debug", "-d", help="Enable debug l
                     except ValueError as exc:
                         console.print(f"[red]{exc}[/red]")
                         continue
-                    output = _format_response(
-                        orchestrator.handle_intent(ShowWeekIntent(week=selected_week)),
-                        orchestrator,
-                    )
+                    result = orchestrator.handle_intent(ShowWeekIntent(week=selected_week))
+                    output = _format_response(result, orchestrator)
                     console.print(output)
+                    remember_chat_focus(state, result)
+                    history.append(("user", user_input))
+                    history.append(("assistant", _history_text(result, output)))
+                    history = history[-8:]
                     continue
                 if local == "issues":
                     output = _format_response(
@@ -923,6 +1004,11 @@ def chat(debug: bool = typer.Option(False, "--debug", "-d", help="Enable debug l
                         orchestrator,
                     )
                     console.print(output)
+                    continue
+
+                if route_utterance(user_input) == "sync":
+                    _run_chat_sync(conn, config, orchestrator)
+                    issue_keys = [issue.key for issue in orchestrator.issues]
                     continue
 
                 saved_plan = None
@@ -934,10 +1020,12 @@ def chat(debug: bool = typer.Option(False, "--debug", "-d", help="Enable debug l
                         console.print(apply_out)
                         if str(apply_out).startswith("[green]"):
                             orchestrator.record_applied_plan(plan)
-                        state.clear()
+                        state.pending_request = None
+                        state.pending_plan = None
                         continue
                     if decision is False:
-                        state.clear()
+                        state.pending_request = None
+                        state.pending_plan = None
                         console.print("[dim]Plan cancelled. Nothing was written to Jira.[/dim]")
                         continue
                     saved_plan = state.pending_plan
@@ -980,32 +1068,36 @@ def chat(debug: bool = typer.Option(False, "--debug", "-d", help="Enable debug l
                     user_message=effective_input,
                     window_start=w_start,
                     window_end=w_end,
+                    focus_weeks=list(state.focus_weeks),
+                    focus_dates=list(state.focus_dates),
                 )
 
-                try:
-                    with console.status("Thinking..."):
-                        intent = asyncio.run(
-                            generate_structured_intent(ai_provider, prompt, ctx)
-                        )
-                except KeyboardInterrupt:
-                    if saved_plan is not None:
-                        state.pending_plan = saved_plan
-                    console.print("\n[dim]Cancelled.[/dim]")
+                route = None if saved_plan is not None else route_utterance(effective_input)
+                if route == "sync":
+                    _run_chat_sync(conn, config, orchestrator)
+                    issue_keys = [issue.key for issue in orchestrator.issues]
                     continue
+                if route is not None:
+                    intent = parse_intent({"type": route}, ctx)
+                else:
+                    try:
+                        with console.status("Thinking..."):
+                            intent = asyncio.run(
+                                generate_structured_intent(ai_provider, prompt, ctx)
+                            )
+                    except KeyboardInterrupt:
+                        if saved_plan is not None:
+                            state.pending_plan = saved_plan
+                        console.print("\n[dim]Cancelled.[/dim]")
+                        continue
                 response = orchestrator.handle_intent(intent, timezone=request_tz)
+                annotate_week_response(response, effective_input)
                 output = _format_response(response, orchestrator)
                 console.print(output)
                 history.append(("user", user_input))
-                preview = response.get("preview")
-                if isinstance(output, str):
-                    history_text = output[:500]
-                elif response.get("type") == "plan_preview" and isinstance(preview, str):
-                    history_text = preview[:500]
-                else:
-                    n = len(response.get("issues") or [])
-                    history_text = f"{n} issues" if n else "Assigned Issues"
-                history.append(("assistant", history_text))
+                history.append(("assistant", _history_text(response, output)))
                 history = history[-8:]
+                remember_chat_focus(state, response)
 
                 bind_pending_from_response(state, response, effective_input)
             except AIAuthenticationError as e:
